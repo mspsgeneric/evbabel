@@ -39,7 +39,7 @@ if not DISCORD_TOKEN:
     raise SystemExit("❌ Missing DISCORD_TOKEN in env")
 
 # Banco de dados local (SQLite)
-DB_PATH = os.getenv("EVLOGGER_DB", "evlogger_links.sqlite")
+DB_PATH = os.getenv("EVBABEL_DB", "evlogger_links.sqlite")
 
 # --- Supabase ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
