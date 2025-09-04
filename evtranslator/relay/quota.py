@@ -33,6 +33,44 @@ async def reserve_quota_if_needed(guild_id: int, text_len: int) -> tuple[bool, i
     except Exception as e:
         logging.exception("Falha ao consumir cota (guild=%s): %s", guild_id, e)
         return False, 0
+    
+# === NOVO: pré-checagem e commit pós-sucesso ===
+
+async def precheck_chars(guild_id: int, needed: int) -> tuple[bool, int, int]:
+    """
+    Apenas valida se há saldo para 'needed' caracteres.
+    NÃO consome. Retorna (ok, used, cap).
+    """
+    if needed <= 0:
+        # sem texto "traduzível" (só URL/anexo), considera ok
+        return True, 0, 0
+    try:
+        quota = await asyncio.to_thread(get_quota, guild_id)
+        used = int(quota.get("used_chars") or 0)
+        cap  = int(quota.get("char_limit")  or 0)
+        if cap and (used + needed) > cap:
+            return False, used, cap
+        return True, used, cap
+    except Exception as e:
+        logging.exception("Falha ao pré-checar cota (guild=%s): %s", guild_id, e)
+        # Falha de leitura → por segurança, não autoriza
+        return False, 0, 0
+
+
+async def commit_chars(guild_id: int, delta: int) -> bool:
+    """
+    Consome 'delta' caracteres APÓS sucesso de tradução/envio.
+    Retorna True em caso de sucesso.
+    """
+    if delta <= 0:
+        return True
+    try:
+        ok, _ = await asyncio.to_thread(consume_chars, guild_id, delta)
+        return bool(ok)
+    except Exception as e:
+        logging.exception("Falha no commit da cota (guild=%s): %s", guild_id, e)
+        return False
+
 
 async def maybe_warn_90pct(guild: discord.Guild, warned_guilds: set[int]):
     try:

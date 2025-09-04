@@ -12,10 +12,18 @@ from evtranslator.webhook import WebhookSender
 from evtranslator.relay.filters import tupperbox_guard, basic_checks, short_text_ok, clamp_text, Dedupe
 from evtranslator.relay.ratelimit import TokenBucket
 from evtranslator.relay.backoff import BackoffCfg, CircuitBreaker
-from evtranslator.relay.quota import ensure_and_snapshot, check_enabled_and_notice, reserve_quota_if_needed, maybe_warn_90pct
+
 from evtranslator.relay.translate_wrap import translate_with_controls
 from evtranslator.relay.send import send_translation
 from evtranslator.relay.attachments import extract_urls
+
+from evtranslator.relay.quota import (
+    ensure_and_snapshot,
+    check_enabled_and_notice,
+    precheck_chars,             # NOVO
+    commit_chars,               # NOVO
+    maybe_warn_90pct,
+)
 
 class RelayCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -109,8 +117,10 @@ class RelayCog(commands.Cog):
         should_translate = len(text_no_urls) >= MIN_MSG_LEN
 
         if should_translate:
-            allowed, _ = await reserve_quota_if_needed(message.guild.id, len(text_no_urls))
-            if not allowed:
+            # 1) Pré-checagem: NÃO consome ainda
+            n_chars = len(text_no_urls)
+            ok, used, cap = await precheck_chars(message.guild.id, n_chars)
+            if not ok:
                 try:
                     await message.channel.send(
                         "⚠️ A cota de tradução deste servidor está esgotada por enquanto. "
@@ -120,6 +130,7 @@ class RelayCog(commands.Cog):
                     pass
                 return
 
+            # 2) Traduz com seus controles (timeout/backoff/circuit/rate)
             translated_core = await translate_with_controls(
                 self.bot.http_session, text_no_urls, src_lang, tgt_lang,
                 getattr(self.bot, "sem", asyncio.Semaphore(1)),
@@ -127,9 +138,11 @@ class RelayCog(commands.Cog):
                 self.backoff_cfg, self.cb, self.rate_limiter.acquire,
             )
             if translated_core is None:
+                # Falhou → não consome
                 return
         else:
             translated_core = text_no_urls  # vazio ou curtinho → não traduz
+
 
         # 🔗 reanexa URLs intactas (uma por linha) ao final do texto traduzido
         if urls_in_text:
@@ -140,6 +153,20 @@ class RelayCog(commands.Cog):
         else:
             translated = translated_core
 
+        # ✅ NOVO: commit da cota só depois que a tradução deu certo
+        if should_translate:
+            committed = await commit_chars(message.guild.id, len(text_no_urls))
+            if not committed:
+                try:
+                    await message.channel.send(
+                        "⚠️ Não foi possível registrar o consumo de cota agora. "
+                        "Tente novamente em instantes."
+                    )
+                except Exception:
+                    pass
+                return
+
         await maybe_warn_90pct(message.guild, self.warned_guilds)
         await send_translation(self.bot, message, target_ch, translated, message.webhook_id is not None)
+
 
