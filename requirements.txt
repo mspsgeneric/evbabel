@@ -1,0 +1,6 @@
+discord.py>=2.3
+aiosqlite
+aiohttp
+python-dotenv
+supabase>=2.0
+requests
