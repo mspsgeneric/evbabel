@@ -2,7 +2,7 @@
 from aiohttp import web
 from .auth import require_auth
 
-def _html(page_title: str, body: str) -> web.Response:
+def _html(page_title: str, body: str, brand_hex: str) -> web.Response:
     return web.Response(
         text=f"""<!doctype html>
 <html lang="pt-br">
@@ -10,6 +10,7 @@ def _html(page_title: str, body: str) -> web.Response:
 <meta charset="utf-8">
 <title>{page_title}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+
 <style>
 :root {{
   --bg: #2b2d31;
@@ -17,28 +18,33 @@ def _html(page_title: str, body: str) -> web.Response:
   --bg-elev-2: #1e1f22;
   --text: #dbdee1;
   --muted: #a4a7ab;
-  --brand: #5865F2;
+  --brand: {brand_hex};
   --success: #23a55a;
   --danger: #f23f43;
   --border: #3f4147;
 }}
 * {{ box-sizing: border-box; }}
-html, body {{ margin:0; padding:0; background:var(--bg); color:var(--text); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, Noto Sans; }}
+html, body {{ margin:0; padding:0; background:var(--bg); color:var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, Noto Sans; }}
 .container {{ max-width: 1100px; margin: 24px auto; padding: 0 16px; }}
 h1 {{ font-size: 20px; font-weight: 700; margin: 0 0 16px; }}
 .card {{ background: var(--bg-elev); border:1px solid var(--border); border-radius: 12px; padding: 16px; }}
 
 /* Tabs */
 .tabs {{ display:flex; gap:8px; margin-bottom:12px; }}
-.tab {{ padding:8px 12px; border-radius:8px; border:1px solid var(--border); background:#3a3c43; color:var(--text); text-decoration:none; }}
+.tab {{ padding:8px 12px; border-radius:8px; border:1px solid var(--border);
+  background:#3a3c43; color:var(--text); text-decoration:none; }}
 .tab.active {{ background: var(--brand); border-color: transparent; }}
 
 /* Listagem / ações */
 .controls {{ display:flex; gap:8px; align-items:center; margin-bottom:12px; }}
 .controls .search {{ flex:1; display:flex; gap:8px; }}
-input[type=text], input[type=number] {{ background:#1e1f22; color:var(--text); border:1px solid var(--border); border-radius:8px; padding:10px 12px; width:100%; }}
+input[type=text], input[type=number], input[type=email] {{
+  background:#1e1f22; color:var(--text); border:1px solid var(--border); border-radius:8px; padding:10px 12px; width:100%;
+}}
 button {{ font: inherit; }}
-.btn {{ display:inline-flex; gap:6px; align-items:center; padding:10px 14px; border-radius:8px; border:1px solid var(--border); background:#3a3c43; color:var(--text); text-decoration:none; cursor:pointer; }}
+.btn {{ display:inline-flex; gap:6px; align-items:center; padding:10px 14px; border-radius:8px;
+  border:1px solid var(--border); background:#3a3c43; color:var(--text); text-decoration:none; cursor:pointer; }}
 .btn.primary {{ background: var(--brand); border-color: transparent; }}
 .btn.secondary {{ background:#3a3c43; }}
 .btn.danger {{ background:#3a3c43; border-color: rgba(242,63,67,.4); color:#ff7a7d; }}
@@ -48,7 +54,8 @@ form.inline {{ display:inline; }}
 /* Tabela */
 .table-wrap {{ width:100%; overflow-x:auto; }}
 table {{ width:100%; border-collapse: collapse; overflow: hidden; border-radius: 12px; min-width: 780px; }}
-thead th {{ background: var(--bg-elev-2); font-weight:600; font-size:12px; letter-spacing:.3px; text-align:left; padding:10px; border-bottom:1px solid var(--border); white-space:nowrap; }}
+thead th {{ background: var(--bg-elev-2); font-weight:600; font-size:12px; letter-spacing:.3px; text-align:left; padding:10px;
+  border-bottom:1px solid var(--border); white-space:nowrap; }}
 tbody td {{ padding:10px; border-bottom:1px solid var(--border); vertical-align: middle; }}
 
 /* Badges */
@@ -58,11 +65,11 @@ tbody td {{ padding:10px; border-bottom:1px solid var(--border); vertical-align:
 
 /* Barra de uso */
 .progress {{ position: relative; width: 160px; height: 8px; background:#202226; border-radius:999px; overflow:hidden; border:1px solid var(--border); }}
-.progress > span {{ position:absolute; inset:0; width: var(--w,0%); background: linear-gradient(90deg, #4e5de2, #5865F2); }}
+.progress > span {{ position:absolute; inset:0; width: var(--w,0%); background: linear-gradient(90deg, #4e5de2, var(--brand)); }}
 .small {{ color: var(--muted); font-size: 12px; }}
 hr {{ border:0; border-top:1px solid var(--border); margin: 12px 0; }}
 
-/* ====== Form (novo/editar) ====== */
+/* Form */
 .form {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }}
 .form label {{ display: flex; flex-direction: column; gap: 6px; }}
 .form .full {{ grid-column: 1 / -1; }}
@@ -70,28 +77,20 @@ hr {{ border:0; border-top:1px solid var(--border); margin: 12px 0; }}
 .form .actions {{ display: flex; gap: 8px; flex-wrap: wrap; }}
 .form .actions .btn {{ flex: 1; text-align: center; }}
 
-/* ====== Mobile layout ====== */
+/* Mobile */
 @media (max-width: 820px) {{
   .controls {{ flex-direction: column; align-items: stretch; }}
   .controls .search {{ width:100%; }}
   .controls .btn.primary {{ width:100%; justify-content:center; }}
 
-  /* Tabela -> cards */
   table, thead, tbody, th, tr, td {{ display:block; min-width: 0; }}
   thead {{ display:none; }}
   tbody tr {{ border:1px solid var(--border); border-radius:12px; margin-bottom:12px; background: var(--bg-elev); }}
   tbody td {{ border-bottom: 1px solid var(--border); display:flex; justify-content:space-between; gap:12px; padding:10px 12px; }}
   tbody td:last-child {{ border-bottom:none; }}
-  tbody td::before {{
-    content: attr(data-label);
-    color: var(--muted);
-    font-size: 12px;
-    min-width: 120px;
-  }}
+  tbody td::before {{ content: attr(data-label); color: var(--muted); font-size: 12px; min-width: 120px; }}
   .progress {{ width: 100%; }}
   .table-wrap {{ overflow: visible; }}
-
-  /* Form em 1 coluna */
   .form {{ grid-template-columns: 1fr; }}
 }}
 </style>
@@ -109,13 +108,25 @@ hr {{ border:0; border-top:1px solid var(--border); margin: 12px 0; }}
     )
 
 def _ctx(request: web.Request):
-    """Resolve em qual 'bot' estamos e qual tabela usar."""
+    """Resolve bot, tabela, título e cor de marca."""
     bot = (request.query.get("bot") or "translator").strip().lower()
     if bot not in ("translator", "logger"):
         bot = "translator"
-    table = "emails_translator" if bot == "translator" else "emails"
-    title = "EVbabel — Admin de Servidores" if bot == "translator" else "EVlogger — Admin de Servidores"
-    return bot, table, title
+
+    if bot == "translator":
+        return {
+            "bot": "translator",
+            "table": "emails_translator",
+            "title": "EVbabel — Admin de Servidores",
+            "brand": "#8b5cf6",  # roxo
+        }
+    else:
+        return {
+            "bot": "logger",
+            "table": "emails",
+            "title": "EVlogger — Admin de Servidores",
+            "brand": "#22c55e",  # verde
+        }
 
 def _tabs(bot: str) -> str:
     return f"""
@@ -129,12 +140,19 @@ def setup_painel_routes(app: web.Application, supabase):
     # ========= LISTAR =========
     async def admin_guilds_list(request: web.Request):
         require_auth(request)
-        bot, table, title = _ctx(request)
+        ctx = _ctx(request)
+        bot, table, title, brand = ctx["bot"], ctx["table"], ctx["title"], ctx["brand"]
         q = (request.query.get("q") or "").strip().lower()
 
+        # Select minimal por bot
+        if bot == "translator":
+            sel = "guild_id,guild_name,translate_enabled,char_limit,used_chars"
+        else:
+            sel = "guild_id,guild_name,email"
+
         rows = (supabase.table(table)
-                .select("guild_id,guild_name,translate_enabled,char_limit,used_chars")
-                .order("updated_at", desc=True)
+                .select(sel)
+                .order("updated_at" if "updated_at" in sel else "created_at", desc=True)
                 .limit(500)
                 .execute()
                 .data) or []
@@ -146,11 +164,13 @@ def setup_painel_routes(app: web.Application, supabase):
         for r in rows:
             gid = r.get("guild_id","")
             name = r.get("guild_name","") or ""
-            enabled = bool(r.get("translate_enabled"))
-            limit_ = int(r.get("char_limit") or 0)
-            used   = int(r.get("used_chars") or 0)
-            pct = 0 if limit_ <= 0 else min(100, int(used * 100 / max(1, limit_)))
-            trs.append(f"""
+
+            if bot == "translator":
+                enabled = bool(r.get("translate_enabled"))
+                limit_  = int(r.get("char_limit") or 0)
+                used    = int(r.get("used_chars") or 0)
+                pct     = 0 if limit_ <= 0 else min(100, int(used * 100 / max(1, limit_)))
+                trs.append(f"""
 <tr>
   <td data-label="guild_id">{gid}</td>
   <td data-label="Nome">{name}</td>
@@ -167,6 +187,26 @@ def setup_painel_routes(app: web.Application, supabase):
     </form>
   </td>
 </tr>""")
+            else:
+                email = r.get("email") or "—"
+                trs.append(f"""
+<tr>
+  <td data-label="guild_id">{gid}</td>
+  <td data-label="Nome">{name}</td>
+  <td data-label="Email log">{email}</td>
+  <td data-label="Ações">
+    <a class="btn" href="/admin/guilds/{gid}/edit?bot={bot}">Editar</a>
+    <form class="inline" method="post" action="/admin/guilds/{gid}/delete?bot={bot}" onsubmit="return confirm('Remover este servidor?')">
+      <button class="btn danger" type="submit">Excluir</button>
+    </form>
+  </td>
+</tr>""")
+
+        # Cabeçalhos por bot
+        if bot == "translator":
+            thead = "<tr><th>guild_id</th><th>Nome</th><th>Tradutor</th><th>Limite</th><th>Carac. Usados</th><th>Ações</th></tr>"
+        else:
+            thead = "<tr><th>guild_id</th><th>Nome</th><th>Email p/ log</th><th>Ações</th></tr>"
 
         body = f"""
 {_tabs(bot)}
@@ -180,24 +220,40 @@ def setup_painel_routes(app: web.Application, supabase):
 </form>
 <div class="table-wrap">
 <table>
-  <thead>
-    <tr>
-      <th>guild_id</th><th>Nome</th><th>Tradutor</th>
-      <th>Limite</th><th>Carac. Usados</th><th>Ações</th>
-    </tr>
-  </thead>
+  <thead>{thead}</thead>
   <tbody>
     {''.join(trs) if trs else '<tr><td data-label="Info" class="small">Nenhum registro.</td></tr>'}
   </tbody>
 </table>
 </div>
 """
-        return _html(title, body)
+        return _html(title, body, brand)
 
     # ========= NOVO =========
     async def admin_guilds_new_get(request: web.Request):
         require_auth(request)
-        bot, table, title = _ctx(request)
+        ctx = _ctx(request)
+        bot, table, title, brand = ctx["bot"], ctx["table"], ctx["title"], ctx["brand"]
+
+        if bot == "translator":
+            extra_fields = """
+  <label class="checkbox full">
+    <input type="checkbox" name="translate_enabled">
+    <span>Habilitar tradutor</span>
+  </label>
+  <label class="full">
+    <span>Limite de caracteres</span>
+    <input name="char_limit" type="number" value="500000" min="0" step="1">
+  </label>
+"""
+        else:
+            extra_fields = """
+  <label class="full">
+    <span>Email para receber logs (opcional)</span>
+    <input name="email" type="email" placeholder="ex.: meu-servidor@gmail.com">
+  </label>
+"""
+
         body = f"""
 {_tabs(bot)}
 <form method="post" class="form" action="/admin/guilds/new?bot={bot}">
@@ -211,15 +267,7 @@ def setup_painel_routes(app: web.Application, supabase):
     <input name="guild_name" placeholder="ex.: Meu Servidor">
   </label>
 
-  <label class="checkbox full">
-    <input type="checkbox" name="translate_enabled">
-    <span>Habilitar tradutor</span>
-  </label>
-
-  <label class="full">
-    <span>Limite de caracteres</span>
-    <input name="char_limit" type="number" value="500000" min="0" step="1">
-  </label>
+  {extra_fields}
 
   <div class="actions full" style="margin-top:4px;">
     <button class="btn primary" type="submit">Salvar</button>
@@ -227,57 +275,59 @@ def setup_painel_routes(app: web.Application, supabase):
   </div>
 </form>
 """
-        return _html("Novo Servidor", body)
+        return _html("Novo Servidor", body, brand)
 
     async def admin_guilds_new_post(request: web.Request):
         require_auth(request)
-        bot, table, _title = _ctx(request)
-        data = await request.post()
+        ctx = _ctx(request)
+        bot, table = ctx["bot"], ctx["table"]
 
+        data = await request.post()
         gid = (data.get("guild_id") or "").strip()
         if not gid:
-            return _html("Erro", f"<p>guild_id é obrigatório.</p><p><a class='btn' href='/admin/guilds/new?bot={bot}'>Voltar</a></p>")
+            return _html("Erro", f"<p>guild_id é obrigatório.</p><p><a class='btn' href='/admin/guilds/new?bot={bot}'>Voltar</a></p>", ctx["brand"])
 
         payload = {
             "guild_id": gid,
             "guild_name": (data.get("guild_name") or "").strip() or None,
-            "translate_enabled": bool(data.get("translate_enabled")),
-            "char_limit": int(data.get("char_limit") or 0),
         }
+
+        if bot == "translator":
+            payload.update({
+                "translate_enabled": bool(data.get("translate_enabled")),
+                "char_limit": int(data.get("char_limit") or 0),
+            })
+        else:
+            # logger
+            email = (data.get("email") or "").strip() or None
+            payload.update({"email": email})
+
         try:
             supabase.table(table).insert(payload).execute()
         except Exception as e:
-            return _html("Erro", f"<p>Erro ao inserir: {e}</p><p><a class='btn' href='/admin/guilds?bot={bot}'>Voltar</a></p>")
+            return _html("Erro", f"<p>Erro ao inserir: {e}</p><p><a class='btn' href='/admin/guilds?bot={bot}'>Voltar</a></p>", ctx["brand"])
         raise web.HTTPFound(f"/admin/guilds?bot={bot}")
 
     # ========= EDITAR =========
     async def admin_guilds_edit_get(request: web.Request):
         require_auth(request)
-        bot, table, title = _ctx(request)
+        ctx = _ctx(request)
+        bot, table, title, brand = ctx["bot"], ctx["table"], ctx["title"], ctx["brand"]
         gid = request.match_info["guild_id"]
+
+        sel = "guild_id,guild_name,translate_enabled,char_limit,used_chars" if bot=="translator" else "guild_id,guild_name,email"
         row = (supabase.table(table)
-               .select("guild_id,guild_name,translate_enabled,char_limit,used_chars")
+               .select(sel)
                .eq("guild_id", gid).maybe_single().execute().data)
         if not row:
-            return _html("Não encontrado", f"<p>Servidor não encontrado.</p><p><a class='btn' href='/admin/guilds?bot={bot}'>Voltar</a></p>")
+            return _html("Não encontrado", f"<p>Servidor não encontrado.</p><p><a class='btn' href='/admin/guilds?bot={bot}'>Voltar</a></p>", brand)
 
-        used = int(row.get("used_chars") or 0)
-        limit_ = int(row.get("char_limit") or 0)
-        pct = 0 if limit_ <= 0 else min(100, int(used * 100 / max(1, limit_)))
-        checked = "checked" if row.get("translate_enabled") else ""
-        body = f"""
-{_tabs(bot)}
-<form method="post" class="form" action="/admin/guilds/{gid}/edit?bot={bot}">
-  <label class="full">
-    <span>guild_id</span>
-    <input value="{row.get('guild_id')}" disabled>
-  </label>
-
-  <label>
-    <span>Nome</span>
-    <input name="guild_name" value="{row.get('guild_name') or ''}">
-  </label>
-
+        if bot == "translator":
+            used   = int(row.get("used_chars") or 0)
+            limit_ = int(row.get("char_limit") or 0)
+            pct    = 0 if limit_ <= 0 else min(100, int(used * 100 / max(1, limit_)))
+            checked = "checked" if row.get("translate_enabled") else ""
+            extra = f"""
   <label class="checkbox">
     <input type="checkbox" name="translate_enabled" {checked}>
     <span>Habilitar tradutor</span>
@@ -293,6 +343,29 @@ def setup_painel_routes(app: web.Application, supabase):
     <div class="progress" style="--w:{pct}%"><span></span></div>
     <div class="small">{used:,} / {limit_:,} ({pct}%)</div>
   </label>
+"""
+        else:
+            extra = f"""
+  <label class="full">
+    <span>Email para receber logs (opcional)</span>
+    <input name="email" type="email" value="{row.get('email') or ''}">
+  </label>
+"""
+
+        body = f"""
+{_tabs(bot)}
+<form method="post" class="form" action="/admin/guilds/{gid}/edit?bot={bot}">
+  <label class="full">
+    <span>guild_id</span>
+    <input value="{row.get('guild_id')}" disabled>
+  </label>
+
+  <label>
+    <span>Nome</span>
+    <input name="guild_name" value="{row.get('guild_name') or ''}">
+  </label>
+
+  {extra}
 
   <div class="actions full" style="margin-top:4px;">
     <button class="btn primary" type="submit">Salvar</button>
@@ -300,33 +373,45 @@ def setup_painel_routes(app: web.Application, supabase):
   </div>
 </form>
 """
-        return _html("Editar Servidor", body)
+        return _html("Editar Servidor", body, brand)
 
     async def admin_guilds_edit_post(request: web.Request):
         require_auth(request)
-        bot, table, _title = _ctx(request)
+        ctx = _ctx(request)
+        bot, table = ctx["bot"], ctx["table"]
         gid = request.match_info["guild_id"]
         data = await request.post()
+
         payload = {
             "guild_name": (data.get("guild_name") or "").strip() or None,
-            "translate_enabled": bool(data.get("translate_enabled")),
-            "char_limit": int(data.get("char_limit") or 0),
         }
+
+        if bot == "translator":
+            payload.update({
+                "translate_enabled": bool(data.get("translate_enabled")),
+                "char_limit": int(data.get("char_limit") or 0),
+            })
+        else:
+            payload.update({
+                "email": (data.get("email") or "").strip() or None,
+            })
+
         try:
             supabase.table(table).update(payload).eq("guild_id", gid).execute()
         except Exception as e:
-            return _html("Erro", f"<p>Erro ao atualizar: {e}</p><p><a class='btn' href='/admin/guilds?bot={bot}'>Voltar</a></p>")
+            return _html("Erro", f"<p>Erro ao atualizar: {e}</p><p><a class='btn' href='/admin/guilds?bot={bot}'>Voltar</a></p>", ctx["brand"])
         raise web.HTTPFound(f"/admin/guilds?bot={bot}")
 
     # ========= EXCLUIR =========
     async def admin_guilds_delete_post(request: web.Request):
         require_auth(request)
-        bot, table, _title = _ctx(request)
+        ctx = _ctx(request)
+        bot, table = ctx["bot"], ctx["table"]
         gid = request.match_info["guild_id"]
         try:
             supabase.table(table).delete().eq("guild_id", gid).execute()
         except Exception as e:
-            return _html("Erro", f"<p>Erro ao excluir: {e}</p><p><a class='btn' href='/admin/guilds?bot={bot}'>Voltar</a></p>")
+            return _html("Erro", f"<p>Erro ao excluir: {e}</p><p><a class='btn' href='/admin/guilds?bot={bot}'>Voltar</a></p>", ctx["brand"])
         raise web.HTTPFound(f"/admin/guilds?bot={bot}")
 
     # Registrar rotas
