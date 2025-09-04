@@ -28,6 +28,11 @@ html, body {{ margin:0; padding:0; background:var(--bg); color:var(--text); font
 h1 {{ font-size: 20px; font-weight: 700; margin: 0 0 16px; }}
 .card {{ background: var(--bg-elev); border:1px solid var(--border); border-radius: 12px; padding: 16px; }}
 
+/* Tabs */
+.tabs {{ display:flex; gap:8px; margin-bottom:12px; }}
+.tab {{ padding:8px 12px; border-radius:8px; border:1px solid var(--border); background:#3a3c43; color:var(--text); text-decoration:none; }}
+.tab.active {{ background: var(--brand); border-color: transparent; }}
+
 /* Listagem / ações */
 .controls {{ display:flex; gap:8px; align-items:center; margin-bottom:12px; }}
 .controls .search {{ flex:1; display:flex; gap:8px; }}
@@ -103,12 +108,31 @@ hr {{ border:0; border-top:1px solid var(--border); margin: 12px 0; }}
         content_type="text/html"
     )
 
+def _ctx(request: web.Request):
+    """Resolve em qual 'bot' estamos e qual tabela usar."""
+    bot = (request.query.get("bot") or "translator").strip().lower()
+    if bot not in ("translator", "logger"):
+        bot = "translator"
+    table = "emails_translator" if bot == "translator" else "emails"
+    title = "EVbabel — Admin de Servidores" if bot == "translator" else "EVlogger — Admin de Servidores"
+    return bot, table, title
+
+def _tabs(bot: str) -> str:
+    return f"""
+<div class="tabs">
+  <a class="tab {'active' if bot=='translator' else ''}" href="/admin/guilds?bot=translator">EVbabel (tradutor)</a>
+  <a class="tab {'active' if bot=='logger' else ''}" href="/admin/guilds?bot=logger">EVlogger (logs)</a>
+</div>
+"""
+
 def setup_painel_routes(app: web.Application, supabase):
     # ========= LISTAR =========
     async def admin_guilds_list(request: web.Request):
         require_auth(request)
+        bot, table, title = _ctx(request)
         q = (request.query.get("q") or "").strip().lower()
-        rows = (supabase.table("emails")
+
+        rows = (supabase.table(table)
                 .select("guild_id,guild_name,translate_enabled,char_limit,used_chars")
                 .order("updated_at", desc=True)
                 .limit(500)
@@ -137,20 +161,22 @@ def setup_painel_routes(app: web.Application, supabase):
     <div class="small">{used:,} / {limit_:,} ({pct}%)</div>
   </td>
   <td data-label="Ações">
-    <a class="btn" href="/admin/guilds/{gid}/edit">Editar</a>
-    <form class="inline" method="post" action="/admin/guilds/{gid}/delete" onsubmit="return confirm('Remover este servidor?')">
+    <a class="btn" href="/admin/guilds/{gid}/edit?bot={bot}">Editar</a>
+    <form class="inline" method="post" action="/admin/guilds/{gid}/delete?bot={bot}" onsubmit="return confirm('Remover este servidor?')">
       <button class="btn danger" type="submit">Excluir</button>
     </form>
   </td>
 </tr>""")
 
         body = f"""
-<form class="controls" method="get">
+{_tabs(bot)}
+<form class="controls" method="get" action="/admin/guilds">
+  <input type="hidden" name="bot" value="{bot}">
   <div class="search">
     <input type="text" name="q" value="{q}" placeholder="Buscar por ID ou nome..." />
     <button class="btn" type="submit">Buscar</button>
   </div>
-  <a class="btn primary" href="/admin/guilds/new">+ Novo</a>
+  <a class="btn primary" href="/admin/guilds/new?bot={bot}">+ Novo</a>
 </form>
 <div class="table-wrap">
 <table>
@@ -166,13 +192,15 @@ def setup_painel_routes(app: web.Application, supabase):
 </table>
 </div>
 """
-        return _html("EVbabel — Admin de Servidores", body)
+        return _html(title, body)
 
     # ========= NOVO =========
     async def admin_guilds_new_get(request: web.Request):
         require_auth(request)
-        body = """
-<form method="post" class="form">
+        bot, table, title = _ctx(request)
+        body = f"""
+{_tabs(bot)}
+<form method="post" class="form" action="/admin/guilds/new?bot={bot}">
   <label>
     <span>guild_id*</span>
     <input name="guild_id" required placeholder="ex.: 123456789012345678">
@@ -195,7 +223,7 @@ def setup_painel_routes(app: web.Application, supabase):
 
   <div class="actions full" style="margin-top:4px;">
     <button class="btn primary" type="submit">Salvar</button>
-    <a class="btn secondary" href="/admin/guilds">Voltar</a>
+    <a class="btn secondary" href="/admin/guilds?bot={bot}">Voltar</a>
   </div>
 </form>
 """
@@ -203,11 +231,12 @@ def setup_painel_routes(app: web.Application, supabase):
 
     async def admin_guilds_new_post(request: web.Request):
         require_auth(request)
+        bot, table, _title = _ctx(request)
         data = await request.post()
 
         gid = (data.get("guild_id") or "").strip()
         if not gid:
-            return _html("Erro", "<p>guild_id é obrigatório.</p><p><a class='btn' href='/admin/guilds/new'>Voltar</a></p>")
+            return _html("Erro", f"<p>guild_id é obrigatório.</p><p><a class='btn' href='/admin/guilds/new?bot={bot}'>Voltar</a></p>")
 
         payload = {
             "guild_id": gid,
@@ -216,27 +245,29 @@ def setup_painel_routes(app: web.Application, supabase):
             "char_limit": int(data.get("char_limit") or 0),
         }
         try:
-            supabase.table("emails").insert(payload).execute()
+            supabase.table(table).insert(payload).execute()
         except Exception as e:
-            return _html("Erro", f"<p>Erro ao inserir: {e}</p><p><a class='btn' href='/admin/guilds'>Voltar</a></p>")
-        raise web.HTTPFound("/admin/guilds")
+            return _html("Erro", f"<p>Erro ao inserir: {e}</p><p><a class='btn' href='/admin/guilds?bot={bot}'>Voltar</a></p>")
+        raise web.HTTPFound(f"/admin/guilds?bot={bot}")
 
     # ========= EDITAR =========
     async def admin_guilds_edit_get(request: web.Request):
         require_auth(request)
+        bot, table, title = _ctx(request)
         gid = request.match_info["guild_id"]
-        row = (supabase.table("emails")
+        row = (supabase.table(table)
                .select("guild_id,guild_name,translate_enabled,char_limit,used_chars")
                .eq("guild_id", gid).maybe_single().execute().data)
         if not row:
-            return _html("Não encontrado", "<p>Servidor não encontrado.</p><p><a class='btn' href='/admin/guilds'>Voltar</a></p>")
+            return _html("Não encontrado", f"<p>Servidor não encontrado.</p><p><a class='btn' href='/admin/guilds?bot={bot}'>Voltar</a></p>")
 
         used = int(row.get("used_chars") or 0)
         limit_ = int(row.get("char_limit") or 0)
         pct = 0 if limit_ <= 0 else min(100, int(used * 100 / max(1, limit_)))
         checked = "checked" if row.get("translate_enabled") else ""
         body = f"""
-<form method="post" class="form">
+{_tabs(bot)}
+<form method="post" class="form" action="/admin/guilds/{gid}/edit?bot={bot}">
   <label class="full">
     <span>guild_id</span>
     <input value="{row.get('guild_id')}" disabled>
@@ -265,7 +296,7 @@ def setup_painel_routes(app: web.Application, supabase):
 
   <div class="actions full" style="margin-top:4px;">
     <button class="btn primary" type="submit">Salvar</button>
-    <a class="btn secondary" href="/admin/guilds">Voltar</a>
+    <a class="btn secondary" href="/admin/guilds?bot={bot}">Voltar</a>
   </div>
 </form>
 """
@@ -273,6 +304,7 @@ def setup_painel_routes(app: web.Application, supabase):
 
     async def admin_guilds_edit_post(request: web.Request):
         require_auth(request)
+        bot, table, _title = _ctx(request)
         gid = request.match_info["guild_id"]
         data = await request.post()
         payload = {
@@ -281,20 +313,21 @@ def setup_painel_routes(app: web.Application, supabase):
             "char_limit": int(data.get("char_limit") or 0),
         }
         try:
-            supabase.table("emails").update(payload).eq("guild_id", gid).execute()
+            supabase.table(table).update(payload).eq("guild_id", gid).execute()
         except Exception as e:
-            return _html("Erro", f"<p>Erro ao atualizar: {e}</p><p><a class='btn' href='/admin/guilds'>Voltar</a></p>")
-        raise web.HTTPFound("/admin/guilds")
+            return _html("Erro", f"<p>Erro ao atualizar: {e}</p><p><a class='btn' href='/admin/guilds?bot={bot}'>Voltar</a></p>")
+        raise web.HTTPFound(f"/admin/guilds?bot={bot}")
 
     # ========= EXCLUIR =========
     async def admin_guilds_delete_post(request: web.Request):
         require_auth(request)
+        bot, table, _title = _ctx(request)
         gid = request.match_info["guild_id"]
         try:
-            supabase.table("emails").delete().eq("guild_id", gid).execute()
+            supabase.table(table).delete().eq("guild_id", gid).execute()
         except Exception as e:
-            return _html("Erro", f"<p>Erro ao excluir: {e}</p><p><a class='btn' href='/admin/guilds'>Voltar</a></p>")
-        raise web.HTTPFound("/admin/guilds")
+            return _html("Erro", f"<p>Erro ao excluir: {e}</p><p><a class='btn' href='/admin/guilds?bot={bot}'>Voltar</a></p>")
+        raise web.HTTPFound(f"/admin/guilds?bot={bot}")
 
     # Registrar rotas
     app.router.add_get("/admin/guilds", admin_guilds_list)
