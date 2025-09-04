@@ -1,0 +1,11 @@
+.env
+config.json
+*.sqlite*
+__pycache__/
+*.pyc
+*.log
+venv/
+logs/
+.env.dev
+bylaws/bylaws_character.html
+bylaws/bylaws_character.meta.json
