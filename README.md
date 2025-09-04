@@ -1,27 +1,26 @@
 
-# EVlogger Translator (Modular)
+# 1. Criar README.md inicial
+@"
+# EVbabel
 
-Tradutor simples PT↔EN para Discord, com espelho por canal e envio via webhook (apelido/avatares).
+Bot de tradução para Discord (fork do módulo de tradução do EVlogger).
 
 ## Requisitos
+
 - Python 3.10+
-- `pip install -r requirements.txt`
-- `.env` com `DISCORD_TOKEN=...`
+- Discord Bot Token
+- Supabase (para quotas e controle)
 
-## Rodar
+## Como rodar local
+
 ```bash
-python main.py
-```
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
 
-## Estrutura
-- `evtranslator/config.py` — env, tunables e constantes
-- `evtranslator/db.py` — SQLite (pares de canais)
-- `evtranslator/translate.py` — cliente Google Web (gtx) com retry/backoff
-- `evtranslator/webhook.py` — envio como autor via webhook
-- `evtranslator/bot.py` — inicialização do bot e cogs
-- `evtranslator/cogs/links.py` — comandos `/link_pt_en`, `/unlink`, `/unlink_all`, `/links`
-- `evtranslator/cogs/relay.py` — handler de mensagens e tradução
-- `main.py` — ponto de entrada
+# rodar o bot
+python main.py
+
 
 ## Variáveis de ambiente úteis
 - `CONCURRENCY` (padrão 6)
