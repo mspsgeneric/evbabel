@@ -90,7 +90,7 @@ def _rpc(name: str, payload: dict, timeout: float = _DEFAULT_TIMEOUT) -> list:
 # === API pública ===
 
 def consume_chars(guild_id: int | str, amount: int) -> tuple[bool, int]:
-    rows = _rpc("rpc_emails_consume_chars", {
+    rows = _rpc("rpc_translator_consume_chars", {
         "p_guild_id": str(guild_id),
         "p_amount": int(amount),
     })
@@ -101,7 +101,7 @@ def consume_chars(guild_id: int | str, amount: int) -> tuple[bool, int]:
     return bool(row.get("allowed", False)), int(row.get("remaining", 0) or 0)
 
 def get_quota(guild_id: int | str) -> dict:
-    rows = _rpc("rpc_emails_get_quota", {"p_guild_id": str(guild_id)})
+    rows = _rpc("rpc_translator_get_quota", {"p_guild_id": str(guild_id)})
     if not rows:
         # Retorno vazio: devolve shape padrão para o /quota não quebrar
         return {
@@ -118,7 +118,8 @@ def get_quota(guild_id: int | str) -> dict:
 
 def ensure_guild_row(guild_id: int | str) -> None:
     base, key = _get_env()
-    url = f"{base}/rest/v1/emails?on_conflict=guild_id"
+    # agora aponta para a tabela nova do tradutor
+    url = f"{base}/rest/v1/emails_translator?on_conflict=guild_id"
     headers = _headers(key) | {"Prefer": "resolution=merge-duplicates"}
     payload = {"guild_id": str(guild_id)}
     r = _get_session().post(url, json=payload, headers=headers, timeout=_DEFAULT_TIMEOUT)
@@ -130,28 +131,28 @@ def ensure_guild_row(guild_id: int | str) -> None:
 # --- Helpers administrativos opcionais (use se precisar no futuro) ---
 
 def set_translate_enabled(guild_id: int | str, enabled: bool) -> dict:
-    rows = _rpc("rpc_emails_set_enabled", {
+    rows = _rpc("rpc_translator_set_enabled", {
         "p_guild_id": str(guild_id),
         "p_enabled": bool(enabled),
     })
     return rows[0] if rows else {}
 
 def set_char_limit(guild_id: int | str, limit: int) -> dict:
-    rows = _rpc("rpc_emails_set_limit", {
+    rows = _rpc("rpc_translator_set_limit", {
         "p_guild_id": str(guild_id),
         "p_limit": int(limit),
     })
     return rows[0] if rows else {}
 
 def set_cycle_tz(guild_id: int | str, tz: str) -> dict:
-    rows = _rpc("rpc_emails_set_tz", {
+    rows = _rpc("rpc_translator_set_tz", {
         "p_guild_id": str(guild_id),
         "p_tz": tz,
     })
     return rows[0] if rows else {}
 
 def set_billing_day(guild_id: int | str, day: int) -> dict:
-    rows = _rpc("rpc_emails_set_billing_day", {
+    rows = _rpc("rpc_translator_set_billing_day", {
         "p_guild_id": str(guild_id),
         "p_day": int(day),
     })
