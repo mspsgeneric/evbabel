@@ -52,6 +52,16 @@ class RelayCog(commands.Cog):
             cooldown_sec=float(os.getenv("EV_CB_COOLDOWN", "30")),
         )
         self.dedupe = Dedupe(float(os.getenv("EV_DEDUPE_WINDOW_SEC", "3.0")))
+        self._rita_cache: dict[int, bool] = {}   # ⬅️ adicione esta linha no __init__
+
+        # === BLOQUEIO DE RITA ===
+        # Ativa/desativa via env (padrão: on)
+        self.rita_block = os.getenv("EV_BLOCK_RITA", "true").lower() == "true"
+        # IDs oficiais (opcional, recomendado). Ex: "123456789012345678,987654321098765432"
+        self.known_rita_ids: set[int] = {
+            int(x.strip()) for x in os.getenv("EV_RITA_IDS", "").split(",") if x.strip().isdigit()
+        }
+
         # expõe o WebhookSender (bot.bot_user_id é setado em on_ready do bot)
         self.webhook_sender = WebhookSender(bot_user_id=None, default_avatar_bytes=None)
         setattr(self.bot, "webhooks", self.webhook_sender)
@@ -66,8 +76,78 @@ class RelayCog(commands.Cog):
             except Exception:
                 pass
 
+    # === RITA: helper de detecção (COLE AQUI, logo abaixo do on_ready) ===
+    async def _guild_has_rita(self, guild: discord.Guild) -> bool:
+        """
+        True se encontrar Rita no servidor.
+        Usa cache; se necessário, força chunk ou fetch dos membros uma única vez.
+        """
+        # cache curto: evita custo por mensagem
+        cached = self._rita_cache.get(guild.id)
+        if cached is not None:
+            return cached
+        try:
+            # 1) Checa membros já carregados
+            def _is_rita(m: discord.Member) -> bool:
+                if not m.bot:
+                    return False
+                if self.known_rita_ids and m.id in self.known_rita_ids:
+                    return True
+                name = (m.name or "").strip().lower()
+                return (name == "rita") or name.startswith("rita ")
+
+            for m in guild.members:
+                if _is_rita(m):
+                    self._rita_cache[guild.id] = True
+                    return True
+
+            # 2) Se a lista parece incompleta, tenta "chunkar"
+            if not getattr(guild, "chunked", False):
+                try:
+                    await guild.chunk()
+                except Exception:
+                    pass
+                for m in guild.members:
+                    if _is_rita(m):
+                        self._rita_cache[guild.id] = True
+                        return True
+
+            # 3) Último recurso: fetch via API (uma vez)
+            try:
+                async for m in guild.fetch_members(limit=None):
+                    if _is_rita(m):
+                        self._rita_cache[guild.id] = True
+                        return True
+            except Exception:
+                # Se falhar o fetch, segue sem travar
+                pass
+
+            self._rita_cache[guild.id] = False
+            return False
+        except Exception:
+            # Em caso de erro inesperado, não bloquear
+            self._rita_cache[guild.id] = False
+            return False
+
+
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
+        # === RITA: checagem e saída imediata (logo no topo) ===
+        if message.guild and self.rita_block and await self._guild_has_rita(message.guild):
+            try:
+                await message.channel.send(
+                    "⚠️ Este servidor já possui um bot de tradução comercial (Rita). "
+                    "O EVbabel não funcionará aqui e será removido."
+                )
+            except Exception:
+                pass
+            try:
+                await message.guild.leave()
+            finally:
+                return
+
+        # === Filtros originais ===
         if not basic_checks(message):
             return
         if not await tupperbox_guard(message):
@@ -76,8 +156,8 @@ class RelayCog(commands.Cog):
         link = await get_link_info(DB_PATH, message.guild.id, message.channel.id)
         if not link:
             return
-        target_id, src_lang, tgt_lang = link
 
+        target_id, src_lang, tgt_lang = link
         target_ch = message.guild.get_channel(target_id)
         if not isinstance(target_ch, discord.TextChannel) or target_id == message.channel.id:
             return
@@ -94,7 +174,7 @@ class RelayCog(commands.Cog):
         # clamp só no que será traduzido
         text_no_urls = clamp_text(text_no_urls)
 
-        # cooldowns (mantém como você já tem)
+        # cooldowns
         now = time.time()
         user_cd = self.user_cd_event if self.event_mode else USER_COOLDOWN_SEC
         if now - self.user_cooldowns.get(message.author.id, 0.0) < user_cd:
@@ -130,7 +210,7 @@ class RelayCog(commands.Cog):
                     pass
                 return
 
-            # 2) Traduz com seus controles (timeout/backoff/circuit/rate)
+            # 2) Traduz com controles (timeout/backoff/circuit/rate)
             translated_core = await translate_with_controls(
                 self.bot.http_session, text_no_urls, src_lang, tgt_lang,
                 getattr(self.bot, "sem", asyncio.Semaphore(1)),
@@ -143,7 +223,6 @@ class RelayCog(commands.Cog):
         else:
             translated_core = text_no_urls  # vazio ou curtinho → não traduz
 
-
         # 🔗 reanexa URLs intactas (uma por linha) ao final do texto traduzido
         if urls_in_text:
             if translated_core:
@@ -153,7 +232,7 @@ class RelayCog(commands.Cog):
         else:
             translated = translated_core
 
-        # ✅ NOVO: commit da cota só depois que a tradução deu certo
+        # ✅ Commit da cota só depois que a tradução deu certo
         if should_translate:
             committed = await commit_chars(message.guild.id, len(text_no_urls))
             if not committed:
@@ -168,5 +247,6 @@ class RelayCog(commands.Cog):
 
         await maybe_warn_90pct(message.guild, self.warned_guilds)
         await send_translation(self.bot, message, target_ch, translated, message.webhook_id is not None)
+
 
 

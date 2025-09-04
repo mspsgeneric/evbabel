@@ -71,3 +71,4 @@ MAX_MSG_LEN = 2000  # limite hard do Discord
 INTENTS = discord.Intents.default()
 INTENTS.guilds = True
 INTENTS.message_content = True
+INTENTS.members = True  # ✅ necessário para listar bots/membros do servidor

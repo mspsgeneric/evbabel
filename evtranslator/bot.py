@@ -24,7 +24,8 @@ log = logging.getLogger(__name__)
 
 class EVTranslatorBot(commands.Bot):
     def __init__(self, db_path: str):
-        super().__init__(command_prefix="!", intents=INTENTS)
+        super().__init__(intents=INTENTS)  # sem command_prefix
+
         self.db_path = db_path
         self.sem = asyncio.Semaphore(CONCURRENCY)
 
