@@ -55,6 +55,9 @@ class RelayCog(commands.Cog):
         self._rita_cache: dict[int, bool] = {}   # ⬅️ adicione esta linha no __init__
         self._rita_warned: set[int] = set()      # ✅ guard anti-spam de aviso
         self._rita_mutex = asyncio.Lock()  # 🔒 evita aviso duplicado por corrida
+        self._guild_snap_ts: dict[int, float] = {}  # throttle de snapshot por guild
+        self._guild_snap_interval = 600.0  # 10 minutos
+
 
         # === BLOQUEIO DE RITA ===
         # Ativa/desativa via env (padrão: on)
@@ -160,6 +163,26 @@ class RelayCog(commands.Cog):
     
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
+        # === Upsert de nome de guild com throttle (garante que grave/atualize mesmo sem links) ===
+        if message.guild is not None:
+            gid = message.guild.id
+            now = time.time()
+            last = self._guild_snap_ts.get(gid, 0.0)
+            if now - last > self._guild_snap_interval:
+                try:
+                    from evtranslator.relay.quota import ensure_and_snapshot
+                    await ensure_and_snapshot(gid, message.guild.name)
+                except Exception:
+                    pass
+                else:
+                    self._guild_snap_ts[gid] = now
+
+
+
+
+
+
+
         # === RITA: checagem e saída imediata com seção crítica ===
         if message.guild and self.rita_block:
             gid = message.guild.id
