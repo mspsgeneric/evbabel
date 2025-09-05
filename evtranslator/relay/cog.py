@@ -90,6 +90,16 @@ class RelayCog(commands.Cog):
         self._rita_warned.discard(guild.id)
         self._rita_cache.pop(guild.id, None)
 
+    @commands.Cog.listener()
+    async def on_guild_update(self, before: discord.Guild, after: discord.Guild):
+        if before.name != after.name:
+            try:
+                from evtranslator.relay.quota import ensure_and_snapshot
+                await ensure_and_snapshot(after.id, after.name)
+            except Exception:
+                pass
+
+
 
     # === RITA: helper de detecção (COLE AQUI, logo abaixo do on_ready) ===
     async def _guild_has_rita(self, guild: discord.Guild) -> bool:
@@ -210,7 +220,8 @@ class RelayCog(commands.Cog):
         if self.event_mode and not self.dedupe.check_and_set(message.channel.id, message.author.id, text):
             return
 
-        snapshot = await ensure_and_snapshot(message.guild.id)
+        snapshot = await ensure_and_snapshot(message.guild.id, message.guild.name)
+
         if not await check_enabled_and_notice(message, snapshot, self.disabled_notice_ts):
             return
 

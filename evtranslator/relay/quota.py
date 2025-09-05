@@ -1,12 +1,31 @@
+
+
 # evtranslator/relay/quota.py
 from __future__ import annotations
 import asyncio, logging, discord
 from evtranslator.supabase_client import ensure_guild_row, get_quota, consume_chars
 
-async def ensure_and_snapshot(guild_id: int) -> dict:
-    try: await asyncio.to_thread(ensure_guild_row, guild_id)
-    except Exception: pass
+async def ensure_and_snapshot(guild_id: int, guild_name: str | None = None) -> dict:
+    """
+    Garante o registro da guild no backend e retorna o snapshot de cota.
+    Se guild_name vier preenchido, tenta atualizar o nome (idempotente).
+    Mantém compatibilidade caso ensure_guild_row aceite só (guild_id).
+    """
+    try:
+        if guild_name:
+            # tenta nova assinatura (guild_id, guild_name)
+            try:
+                await asyncio.to_thread(ensure_guild_row, guild_id, guild_name)
+            except TypeError:
+                # fallback p/ versões antigas
+                await asyncio.to_thread(ensure_guild_row, guild_id)
+        else:
+            await asyncio.to_thread(ensure_guild_row, guild_id)
+    except Exception:
+        pass
+
     return await asyncio.to_thread(get_quota, guild_id)
+
 
 async def check_enabled_and_notice(message: discord.Message, snapshot: dict, last_notice_ts: dict[int,float]) -> bool:
     import time
