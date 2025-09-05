@@ -34,6 +34,23 @@ class WebhookSender:
         # Deve ser preenchida pelo Cog: self.webhook_sender.http_session = self.bot.http_session
         self.http_session: Optional[aiohttp.ClientSession] = None
 
+    async def _is_ours(self, wh: discord.Webhook) -> bool:
+        """Retorna True se o webhook for nosso (criado pelo bot) ou tiver o nome padrão."""
+        try:
+            # tentar usar o usuário criador do webhook (melhor sinal)
+            u = getattr(wh, "user", None)
+            if u and u.id and self.bot_user_id and u.id == self.bot_user_id:
+                return True
+        except Exception:
+            pass
+        # fallback: nome padrão
+        try:
+            if (wh.name or "").strip() == TARGET_NAME:
+                return True
+        except Exception:
+            pass
+        return False
+
     async def get_by_id(self, webhook_id: int) -> Optional[discord.Webhook]:
         """
         Reconstrói um webhook a partir de (id, token) persistidos no banco.
@@ -44,7 +61,17 @@ class WebhookSender:
             return None
         _guild_id, _channel_id, token = info
         try:
-            return discord.Webhook.partial(id=int(webhook_id), token=token, session=self.http_session)
+            wh = discord.Webhook.partial(id=int(webhook_id), token=token, session=self.http_session)
+            # tentar validar “se é nosso” via fetch (quando possível)
+            try:
+                full = await wh.fetch()
+                if not await self._is_ours(full):
+                    return None
+            except Exception:
+                # se não deu pra fetch, segue com o parcial (melhor do que nada),
+                # pois a linha vem do nosso DB e em geral foi criada por nós.
+                pass
+            return wh
         except Exception:
             return None
 
@@ -52,8 +79,8 @@ class WebhookSender:
         """
         Obtém um webhook utilizável para o canal, na ordem:
         1) cache em memória
-        2) token persistido no DB para este canal
-        3) algum webhook existente no canal (somente se tiver token)
+        2) token persistido no DB para este canal (mas só se for “nosso”)
+        3) algum webhook existente no canal (somente se for “nosso” e tiver token)
         4) cria um novo webhook e persiste token
         """
         # 1) cache
@@ -68,26 +95,38 @@ class WebhookSender:
                 wid, token = saved
                 try:
                     wh = discord.Webhook.partial(id=int(wid), token=token, session=self.http_session)
-                    self.cache[channel.id] = wh
-                    return wh
+                    # tenta validar “nosso” via fetch; se não der, confia no DB
+                    try:
+                        full = await wh.fetch()
+                        if not await self._is_ours(full):
+                            wh = None
+                    except Exception:
+                        pass
+                    if wh is not None:
+                        self.cache[channel.id] = wh
+                        return wh
                 except Exception:
                     pass
         except Exception:
             pass
 
-        # 3) procurar existentes via API (se o bot tiver permissão) — só usa se tiver token
+        # 3) procurar existentes via API (se o bot tiver permissão) — usa apenas se for “nosso”
         try:
             hooks = await channel.webhooks()
             for h in hooks:
-                if h.token:
-                    self.cache[channel.id] = h
-                    try:
-                        await upsert_webhook_token(
-                            DB_PATH, channel.guild.id, channel.id, int(h.id), str(h.token), int(time.time())
-                        )
-                    except Exception:
-                        pass
-                    return h
+                if not h.token:
+                    continue
+                if not await self._is_ours(h):
+                    continue  # NÃO usar/salvar webhooks alheios (ex.: Tupperbox)
+
+                self.cache[channel.id] = h
+                try:
+                    await upsert_webhook_token(
+                        DB_PATH, channel.guild.id, channel.id, int(h.id), str(h.token), int(time.time())
+                    )
+                except Exception:
+                    pass
+                return h
         except Exception:
             pass
 

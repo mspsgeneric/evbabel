@@ -1,7 +1,10 @@
 # evtranslator/relay/send.py
 from __future__ import annotations
+import os
 import re
+from urllib.parse import urlparse
 import discord
+
 from evtranslator.config import TRANSLATED_FLAG, MAX_MSG_LEN
 from evtranslator.relay.attachments import (
     split_attachment_urls,
@@ -9,7 +12,18 @@ from evtranslator.relay.attachments import (
     rewrite_links,
 )
 
-# detecta se o texto é apenas o(s) nome(s) de arquivo de mídia (ex.: "VID-...mp4")
+# ==========================
+# Sanitização de invisíveis
+# ==========================
+ZERO_WIDTH = "\u200b\u200c\u200d\u2060\ufeff"
+_ZW_TABLE = {ord(c): None for c in ZERO_WIDTH}
+
+def _strip_zw(s: str) -> str:
+    return (s or "").translate(_ZW_TABLE)
+
+# ==========================
+# Heurísticas de mídia/nomes
+# ==========================
 _MEDIA_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".mp4", ".mov", ".webm", ".mkv", ".m4v")
 _FILENAME_ONLY_RE = re.compile(r'^[\w\-\s\.\(\)\[\]]+\.[A-Za-z0-9]{2,4}$')
 
@@ -47,22 +61,141 @@ def _split_by_limit(lines: list[str]) -> list[str]:
         msgs.append(cur)
     return msgs
 
-# evtranslator/relay/send.py
+# ==========================
+# Helpers de URL
+# ==========================
+_URL_ONLY_RE = re.compile(r'\s*https?://[^\s\u200b\u200c\u200d\u2060\ufeff]+\s*$')
 
+def _is_pure_url_block(s: str) -> bool:
+    return bool(_URL_ONLY_RE.fullmatch(s or ""))
+
+def _one_url(text: str) -> str | None:
+    m = re.search(r'https?://[^\s\u200b\u200c\u200d\u2060\ufeff]+', text or "")
+    return _strip_zw(m.group(0)) if m else None
+
+def _domain(url: str) -> str:
+    try:
+        u = _strip_zw(url)
+        host = urlparse(u).netloc.lower()
+        return host[4:] if host.startswith("www.") else host
+    except Exception:
+        return ""
+
+# ==========================
+# Suporte a Imgur (#anchor)
+# ==========================
+_DEF_DIRECT_RESOLVE_DOMAINS = {"imgur.com"}
+_ENV = os.getenv("EV_URL_DIRECT_EMBED_DOMAINS", "")
+_DIRECT_EMBED_DOMAINS = (
+    {d.strip().lower() for d in _ENV.split(",") if d.strip()} if _ENV.strip() else _DEF_DIRECT_RESOLVE_DOMAINS
+)
+
+def _imgur_anchor_id(url: str) -> str | None:
+    """
+    Para URLs tipo:
+      https://imgur.com/gallery/<slug-ou-id>#<imageId>
+      https://imgur.com/a/<album>#<imageId>
+    retorna <imageId> (alfa-num).
+    """
+    try:
+        frag = _strip_zw(urlparse(_strip_zw(url)).fragment)
+        if frag and re.fullmatch(r'[A-Za-z0-9]+', frag):
+            return frag
+    except Exception:
+        pass
+    return None
+
+async def _probe_direct_url(session, url: str) -> bool:
+    """
+    Verifica rapidamente se a URL existe e é imagem/vídeo leve.
+    Tenta HEAD; se 405/403, tenta GET com Range pequeno.
+    """
+    try:
+        async with session.head(url, allow_redirects=True) as r:
+            if r.status == 200:
+                ctype = (r.headers.get("Content-Type") or "").lower()
+                return ctype.startswith("image/") or ctype.startswith("video/")
+            if r.status in (403, 405):
+                headers = {"Range": "bytes=0-0"}
+                async with session.get(url, headers=headers, allow_redirects=True) as g:
+                    if g.status in (200, 206):
+                        ctype = (g.headers.get("Content-Type") or "").lower()
+                        return ctype.startswith("image/") or ctype.startswith("video/")
+        return False
+    except Exception:
+        return False
+
+async def _resolve_imgur_direct(session, original_url: str) -> str | None:
+    """
+    Se for link do Imgur com âncora, tenta resolver para link direto:
+      i.imgur.com/<id>.gif|jpg|png|jpeg|mp4
+    """
+    img_id = _imgur_anchor_id(original_url)
+    if not img_id:
+        return None
+    candidates = [
+        f"https://i.imgur.com/{img_id}.gif",
+        f"https://i.imgur.com/{img_id}.jpg",
+        f"https://i.imgur.com/{img_id}.png",
+        f"https://i.imgur.com/{img_id}.jpeg",
+        f"https://i.imgur.com/{img_id}.mp4",  # por último
+    ]
+    for direct in candidates:
+        ok = await _probe_direct_url(session, direct)
+        if ok:
+            return direct
+    return None
+
+# ==========================
+# Envio via webhook
+# ==========================
+async def _send(
+    bot, src_msg: discord.Message, target_ch: discord.TextChannel,
+    content: str, is_proxy_msg: bool, return_message: bool = False, **kwargs
+):
+    try:
+        if is_proxy_msg:
+            username = src_msg.author.name or src_msg.author.display_name
+            avatar_url = str(src_msg.author.display_avatar.url) if src_msg.author.display_avatar else None
+            return await bot.webhooks.send_as_identity(
+                target_ch, username, avatar_url, content,
+                allowed_mentions=discord.AllowedMentions.none(),
+                return_message=return_message,
+                **kwargs,
+            )
+        else:
+            return await bot.webhooks.send_as_member(
+                target_ch, src_msg.author, content,
+                allowed_mentions=discord.AllowedMentions.none(),
+                return_message=return_message,
+                **kwargs,
+            )
+    except TypeError:
+        # Fallback sem webhook: não retornamos IDs (não dá para editar depois)
+        await target_ch.send(content=content, allowed_mentions=discord.AllowedMentions.none(), **kwargs)
+        return None
+
+# ==========================
+# Função principal
+# ==========================
 async def send_translation(
     bot, src_msg: discord.Message, target_ch: discord.TextChannel,
     translated_text: str | None, is_proxy_msg: bool
 ):
-    # (1) ... código que já existe até montar msgs ...
+    # Texto base (com URLs do corpo)
     base_text = (translated_text or "").strip()
     if base_text:
         base_text = rewrite_proxied_image_urls_in_text(base_text)
 
+    # URLs de anexos
     media_urls, other_urls = split_attachment_urls(src_msg.attachments or [])
     media_urls = rewrite_links(media_urls)
     other_urls = rewrite_links(other_urls)
+
+    # remove texto que é só nomes de arquivos anexados
     base_text = strip_filename_only_text(base_text, src_msg.attachments or [])
 
+    # Monta blocos
     msgs: list[str] = []
     if base_text:
         msgs.append(base_text)
@@ -74,58 +207,51 @@ async def send_translation(
     if not msgs:
         return None
 
-    # Não atrapalhar embeds: evite colar flag em mensagens que são só URL
-    def _is_pure_url_block(s: str) -> bool:
-        return bool(re.fullmatch(r'\s*https?://\S+\s*', s or ""))
+    # ===== Caso especial: mensagem é APENAS uma URL =====
+    if len(msgs) == 1 and _is_pure_url_block(msgs[0]):
+        url = _one_url(msgs[0]) or ""
+        dom = _domain(url)
 
-    # tenta colocar a flag na última mensagem que não seja apenas URL
+        # só tentamos resolver “direto” para domínios suportados
+        if any(dom == d or dom.endswith("." + d) for d in _DIRECT_EMBED_DOMAINS):
+            session = getattr(bot, "http_session", None) or getattr(bot.webhooks, "http_session", None)
+            direct = None
+            if session is not None and dom.endswith("imgur.com"):
+                direct = await _resolve_imgur_direct(session, url)
+
+            if direct:
+                # mp4: melhor enviar o link direto no conteúdo (player nativo)
+                if direct.lower().endswith(".mp4"):
+                    return await _send(
+                        bot, src_msg, target_ch, direct, is_proxy_msg, return_message=True
+                    )
+                # imagem: usa embed explícito (mantém identidade do autor)
+                emb = discord.Embed(url=url)  # link de referência
+                emb.set_image(url=direct)
+                return await _send(
+                    bot, src_msg, target_ch, "", is_proxy_msg, return_message=True, embeds=emb
+                )
+        # Se não deu pra resolver direto, seguimos; IMPORTANTE: não aplicar flag em URL pura
+        # para não quebrar o preview nativo do Discord.
+
+    # ⚑ FLAG anti-loop: aplique SOMENTE na última mensagem que NÃO seja apenas URL.
     applied = False
     for i in range(len(msgs) - 1, -1, -1):
         if not _is_pure_url_block(msgs[i]):
             if len(msgs[i]) + len(TRANSLATED_FLAG) <= MAX_MSG_LEN:
-                msgs[i] += TRANSLATED_FLAG
+                msgs[i] = msgs[i] + TRANSLATED_FLAG
             else:
                 msgs.append(TRANSLATED_FLAG)
             applied = True
             break
+    # Se TODAS forem apenas URL, não aplica flag (pra não matar preview).
 
-    # se todas as mensagens são só link, manda a flag como mensagem separada
-    if not applied:
-        msgs.append(TRANSLATED_FLAG)
-
-
-    # (2) Envia e CAPTURA os IDs só da primeira mensagem de conteúdo (se existir).
+    # Envie e capture IDs só do primeiro bloco que seja “conteúdo” (não-URL)
     saved_ids = None
     for i, body in enumerate(msgs):
-        want_ids = (i == 0 and bool(base_text))  # captura o primeiro "conteúdo"
+        want_ids = (i == 0)
         ids = await _send(bot, src_msg, target_ch, body, is_proxy_msg, return_message=want_ids)
         if want_ids and ids:
             saved_ids = ids
 
-    return saved_ids  # (msg_id, webhook_id) ou None
-
-
-async def _send(
-    bot, src_msg: discord.Message, target_ch: discord.TextChannel,
-    content: str, is_proxy_msg: bool, return_message: bool = False
-):
-    try:
-        if is_proxy_msg:
-            username = src_msg.author.name or src_msg.author.display_name
-            avatar_url = str(src_msg.author.display_avatar.url) if src_msg.author.display_avatar else None
-            return await bot.webhooks.send_as_identity(
-                target_ch, username, avatar_url, content,
-                allowed_mentions=discord.AllowedMentions.none(),
-                return_message=return_message,
-            )
-        else:
-            return await bot.webhooks.send_as_member(
-                target_ch, src_msg.author, content,
-                allowed_mentions=discord.AllowedMentions.none(),
-                return_message=return_message,
-            )
-    except TypeError:
-        # Fallback sem webhook: não retornamos IDs (não dá para editar depois)
-        await target_ch.send(content=content, allowed_mentions=discord.AllowedMentions.none())
-        return None
-
+    return saved_ids

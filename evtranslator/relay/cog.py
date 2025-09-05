@@ -21,6 +21,7 @@ from evtranslator.relay.backoff import BackoffCfg, CircuitBreaker
 from evtranslator.relay.translate_wrap import translate_with_controls
 from evtranslator.relay.send import send_translation
 from evtranslator.relay.attachments import extract_urls
+from evtranslator.config import TRANSLATED_FLAG
 
 from evtranslator.db import (
     record_translation,
@@ -28,6 +29,7 @@ from evtranslator.db import (
     touch_translation_edit,
     purge_xlate_older_than,
     delete_translation_map,
+    get_webhook_token_by_id,
 )
 
 from evtranslator.relay.quota import (
@@ -56,6 +58,8 @@ class RelayCog(commands.Cog):
         rate = float(os.getenv("EV_PROVIDER_RATE_CAP", "12"))
         burst = float(os.getenv("EV_PROVIDER_BURST", "24"))
         self.rate_limiter = TokenBucket(rate, burst)
+        self._own_wh_cache: set[int] = set()  # IDs de webhooks “nossos” (persistidos no DB)
+
 
         self.translate_timeout = float(os.getenv("EV_TRANSLATE_TIMEOUT", "8"))
         self.jitter_ms = int(os.getenv("EV_JITTER_MS", "150"))
@@ -297,8 +301,35 @@ class RelayCog(commands.Cog):
             self._rita_cache[guild.id] = False
             return False
 
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
+        # Ignore mensagens que vieram de WEBHOOKS NOSSOS (evita eco).
+        # - Mensagens do Tupperbox também são webhooks, mas NÃO estão na tabela webhook_tokens,
+        #   então continuam sendo traduzidas normalmente.
+        if message.webhook_id is not None:
+            wid = int(message.webhook_id)
+
+            # cache rápido: já marcamos esse webhook como “nosso”
+            if wid in self._own_wh_cache:
+                return
+
+            # consulta no banco: se temos token salvo, é um webhook “nosso”
+            info = None
+            try:
+                info = await get_webhook_token_by_id(DB_PATH, wid)
+            except Exception:
+                info = None
+
+            if info is not None:
+                # é nosso webhook → não traduzir (evita eco)
+                self._own_wh_cache.add(wid)
+                return
+
+        # fallback extra: se por algum motivo o conteúdo tiver nossa flag invisível, ignore
+        from evtranslator.config import TRANSLATED_FLAG
+        if TRANSLATED_FLAG in (message.content or ""):
+            return
         # snapshot throttle
         snapshot = None
         if message.guild is not None:
@@ -351,8 +382,29 @@ class RelayCog(commands.Cog):
         text_no_urls, urls_in_text = extract_urls(text)
         has_url = bool(urls_in_text)
 
-        if not short_text_ok(text_no_urls or text, has_atts, has_url):
+        # --- DEBUG: checa hosts das URLs do texto
+        from urllib.parse import urlparse
+        try:
+            url_hosts = {(urlparse(u).netloc or "").lower() for u in urls_in_text}
+        except Exception:
+            url_hosts = set()
+
+        # Gate original
+        ok_basic = short_text_ok(text_no_urls or text, has_atts, has_url)
+
+        # Override: se tiver Imgur, passa mesmo sendo "só link" curto
+        if not ok_basic and any(h.endswith("imgur.com") for h in url_hosts):
+            log.info("override short_text_ok: liberando por conter imgur (hosts=%s)", sorted(url_hosts))
+            ok_basic = True
+
+        # Se continuar bloqueado, loga e sai (pra sabermos se o problema estava aqui)
+        if not ok_basic:
+            log.info(
+                "skip short_text_ok: len_no_urls=%s, has_atts=%s, has_url=%s, hosts=%s, preview=%r",
+                len(text_no_urls or ""), has_atts, has_url, sorted(url_hosts), (text[:100] if text else "")
+            )
             return
+
 
         text_no_urls = clamp_text(text_no_urls)
 
