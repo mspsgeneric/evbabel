@@ -53,6 +53,7 @@ class RelayCog(commands.Cog):
         )
         self.dedupe = Dedupe(float(os.getenv("EV_DEDUPE_WINDOW_SEC", "3.0")))
         self._rita_cache: dict[int, bool] = {}   # ⬅️ adicione esta linha no __init__
+        self._rita_warned: set[int] = set()      # ✅ guard anti-spam de aviso
 
         # === BLOQUEIO DE RITA ===
         # Ativa/desativa via env (padrão: on)
