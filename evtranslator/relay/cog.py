@@ -17,6 +17,7 @@ from evtranslator.relay.translate_wrap import translate_with_controls
 from evtranslator.relay.send import send_translation
 from evtranslator.relay.attachments import extract_urls
 
+
 from evtranslator.relay.quota import (
     ensure_and_snapshot,
     check_enabled_and_notice,
@@ -97,7 +98,6 @@ class RelayCog(commands.Cog):
     async def on_guild_update(self, before: discord.Guild, after: discord.Guild):
         if before.name != after.name:
             try:
-                from evtranslator.relay.quota import ensure_and_snapshot
                 await ensure_and_snapshot(after.id, after.name)
             except Exception:
                 pass
@@ -159,29 +159,21 @@ class RelayCog(commands.Cog):
 
 
 
-    
-    
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # === Upsert de nome de guild com throttle (garante que grave/atualize mesmo sem links) ===
+        # === Upsert + snapshot com throttle (evita hits a cada msg) ===
+        snapshot = None
         if message.guild is not None:
             gid = message.guild.id
             now = time.time()
             last = self._guild_snap_ts.get(gid, 0.0)
             if now - last > self._guild_snap_interval:
                 try:
-                    from evtranslator.relay.quota import ensure_and_snapshot
-                    await ensure_and_snapshot(gid, message.guild.name)
+                    snapshot = await ensure_and_snapshot(gid, message.guild.name)
                 except Exception:
-                    pass
+                    snapshot = None
                 else:
                     self._guild_snap_ts[gid] = now
-
-
-
-
-
-
 
         # === RITA: checagem e saída imediata com seção crítica ===
         if message.guild and self.rita_block:
@@ -243,9 +235,15 @@ class RelayCog(commands.Cog):
         if self.event_mode and not self.dedupe.check_and_set(message.channel.id, message.author.id, text):
             return
 
-        snapshot = await ensure_and_snapshot(message.guild.id, message.guild.name)
+        # 🔁 Fallback: se o throttle não buscou agora, garanta um snapshot aqui
+        if snapshot is None and message.guild is not None:
+            try:
+                snapshot = await ensure_and_snapshot(message.guild.id, message.guild.name)
+            except Exception:
+                snapshot = {}
 
-        if not await check_enabled_and_notice(message, snapshot, self.disabled_notice_ts):
+        # ❗️Checagem de habilitação/aviso
+        if not await check_enabled_and_notice(message, snapshot or {}, self.disabled_notice_ts):
             return
 
         # 🔠 traduz só o que não é URL
