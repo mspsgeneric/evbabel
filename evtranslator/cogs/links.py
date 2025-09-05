@@ -184,6 +184,7 @@ class LinksCog(commands.Cog):
         log.warning(f"[links] {inter.guild.id}: unlink_all ({count} pares)")
         await inter.response.send_message(f"🧹 Todos os links foram removidos. ({count} par(es))", ephemeral=True)
 
+    
     # ========== /links ==========
     @app_commands.command(name="links", description="Lista os pares de canais linkados neste servidor.")
     @app_commands.guild_only()
@@ -195,24 +196,26 @@ class LinksCog(commands.Cog):
         assert isinstance(user, discord.Member)
         is_admin = user.guild_permissions.administrator or user.guild_permissions.manage_guild
 
+        # ✅ SEMPRE ephemeral
+        await inter.response.defer(ephemeral=True, thinking=False)
+
         # preferir versão com owner, se existir
         try:
-            list_with_owner = getattr(__import__("evtranslator.db", fromlist=["list_links_with_owner"]), "list_links_with_owner", None)
+            list_with_owner = getattr(__import__("evtranslator.db", fromlist=["list_links_with_owner"]),
+                                    "list_links_with_owner", None)
         except Exception:
             list_with_owner = None
 
         pairs = None
         if callable(list_with_owner):
             try:
-                # retorna lista de tuplas: (a, la, b, lb, created_by)
+                # retorna lista: (a, la, b, lb, created_by)
                 pairs = await list_with_owner(DB_PATH, inter.guild.id)  # type: ignore[arg-type]
             except Exception as e:
                 log.warning("[links] list_links_with_owner falhou/indisponível: %s", e)
 
         if pairs is None:
-            # fallback para API antiga sem owner
             raw = await list_links(DB_PATH, inter.guild.id)  # type: ignore[arg-type]
-            # normaliza para formato comum com created_by=None
             pairs = [(a, la, b, lb, None) for (a, la, b, lb) in raw]
 
         # 🔎 filtro de visualização:
@@ -228,9 +231,8 @@ class LinksCog(commands.Cog):
 
         if not visible:
             if is_admin:
-                return await inter.response.send_message("Nenhum link configurado.", ephemeral=True)
-            # usuário comum sem links próprios
-            return await inter.response.send_message(
+                return await inter.followup.send("Nenhum link configurado.", ephemeral=True)
+            return await inter.followup.send(
                 "Você ainda **não criou** nenhum link. Crie com `/linkar` ou peça a um administrador.",
                 ephemeral=True
             )
@@ -275,10 +277,10 @@ class LinksCog(commands.Cog):
             nota.append(f"ℹ️ {skips} par(es) ignorado(s) — tipo de canal não suportado.")
         if not is_admin:
             nota.append(f"👤 Mostrando **apenas os seus** links. ({mine})")
-
         nota_str = ("\n" + "\n".join(nota)) if nota else ""
 
-        await inter.response.send_message(
+        await inter.followup.send(
             f"**Pares de canais linkados ({total}):**\n{msg}{nota_str}",
-            ephemeral=not is_admin  # admin pode querer listar publicamente
+            ephemeral=True
         )
+
