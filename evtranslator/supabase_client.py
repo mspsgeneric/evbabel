@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, Optional
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -116,13 +116,39 @@ def get_quota(guild_id: int | str) -> dict:
         }
     return rows[0]
 
-def ensure_guild_row(guild_id: int | str) -> None:
+def ensure_guild_row(guild_id: int | str, guild_name: Optional[str] = None) -> None:
+    """
+    Upsert idempotente do registro da guild na tabela do tradutor.
+    - Se guild_name for fornecido, tenta gravar também o nome.
+    - Se o backend não tiver a coluna de nome, re-tenta sem o campo (fallback).
+    """
     base, key = _get_env()
     # agora aponta para a tabela nova do tradutor
     url = f"{base}/rest/v1/emails_translator?on_conflict=guild_id"
     headers = _headers(key) | {"Prefer": "resolution=merge-duplicates"}
+
+    # 1) tenta com nome (se fornecido)
     payload = {"guild_id": str(guild_id)}
+    if guild_name:
+        payload["guild_name"] = str(guild_name)
+
     r = _get_session().post(url, json=payload, headers=headers, timeout=_DEFAULT_TIMEOUT)
+    if 200 <= r.status_code < 300:
+        return
+
+    # 2) se falhou e tinha guild_name, re-tenta sem o campo (fallback seguro)
+    if guild_name:
+        payload_no_name = {"guild_id": str(guild_id)}
+        r2 = _get_session().post(url, json=payload_no_name, headers=headers, timeout=_DEFAULT_TIMEOUT)
+        try:
+            r2.raise_for_status()
+        except requests.HTTPError as e:
+            raise RuntimeError(
+                f"ensure_guild_row falhou (fallback sem nome): {e} | status={r2.status_code} body={r2.text[:500]}"
+            ) from None
+        return
+
+    # 3) sem nome e falhou → levanta
     try:
         r.raise_for_status()
     except requests.HTTPError as e:
