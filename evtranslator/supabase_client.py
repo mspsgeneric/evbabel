@@ -16,6 +16,7 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)  # rai
 
 # Timeout padrão (pode ajustar via SUPABASE_TIMEOUT=10)
 _DEFAULT_TIMEOUT = float(os.getenv("SUPABASE_TIMEOUT", "10"))
+_SUPABASE_DEBUG = os.getenv("SUPABASE_DEBUG", "false").lower() == "true"
 
 # --- Sessão HTTP com retries leves ---
 _session: requests.Session | None = None
@@ -76,7 +77,6 @@ def _rpc(name: str, payload: dict, timeout: float = _DEFAULT_TIMEOUT) -> list:
     try:
         r.raise_for_status()
     except requests.HTTPError as e:
-        # inclui corpo da resposta pra log/diagnóstico
         msg = f"RPC {name} falhou: {e} | status={r.status_code} body={r.text[:500]}"
         raise RuntimeError(msg) from None
 
@@ -116,43 +116,61 @@ def get_quota(guild_id: int | str) -> dict:
         }
     return rows[0]
 
-def ensure_guild_row(guild_id: int | str, guild_name: Optional[str] = None) -> None:
-    """
-    Upsert idempotente do registro da guild na tabela do tradutor.
-    - Se guild_name for fornecido, tenta gravar também o nome.
-    - Se o backend não tiver a coluna de nome, re-tenta sem o campo (fallback).
-    """
+# --- helpers REST para nomes/linhas ---
+
+def _post_upsert_emails_translator(payload: dict) -> requests.Response:
     base, key = _get_env()
-    # agora aponta para a tabela nova do tradutor
     url = f"{base}/rest/v1/emails_translator?on_conflict=guild_id"
     headers = _headers(key) | {"Prefer": "resolution=merge-duplicates"}
-
-    # 1) tenta com nome (se fornecido)
-    payload = {"guild_id": str(guild_id)}
-    if guild_name:
-        payload["guild_name"] = str(guild_name)
-
     r = _get_session().post(url, json=payload, headers=headers, timeout=_DEFAULT_TIMEOUT)
+    if _SUPABASE_DEBUG:
+        print("POST upsert emails_translator", r.status_code, r.text[:300])
+    return r
+
+def _patch_emails_translator(guild_id: int | str, patch: dict) -> requests.Response:
+    base, key = _get_env()
+    url = f"{base}/rest/v1/emails_translator?guild_id=eq.{guild_id}"
+    headers = _headers(key) | {"Prefer": "return=representation"}
+    r = _get_session().patch(url, json=patch, headers=headers, timeout=_DEFAULT_TIMEOUT)
+    if _SUPABASE_DEBUG:
+        print("PATCH emails_translator", r.status_code, r.text[:300])
+    return r
+
+def set_guild_name_force(guild_id: int | str, guild_name: str) -> bool:
+    """
+    Força atualização do nome da guild via PATCH direto na linha.
+    Retorna True se alterou com sucesso (2xx).
+    """
+    r = _patch_emails_translator(guild_id, {"guild_name": str(guild_name)})
     if 200 <= r.status_code < 300:
-        return
-
-    # 2) se falhou e tinha guild_name, re-tenta sem o campo (fallback seguro)
-    if guild_name:
-        payload_no_name = {"guild_id": str(guild_id)}
-        r2 = _get_session().post(url, json=payload_no_name, headers=headers, timeout=_DEFAULT_TIMEOUT)
-        try:
-            r2.raise_for_status()
-        except requests.HTTPError as e:
-            raise RuntimeError(
-                f"ensure_guild_row falhou (fallback sem nome): {e} | status={r2.status_code} body={r2.text[:500]}"
-            ) from None
-        return
-
-    # 3) sem nome e falhou → levanta
+        return True
+    # Se coluna não existir ou outra falha, levanta só se debug desativado; senão, dá contexto
     try:
         r.raise_for_status()
     except requests.HTTPError as e:
-        raise RuntimeError(f"ensure_guild_row falhou: {e} | status={r.status_code} body={r.text[:500]}") from None
+        raise RuntimeError(f"set_guild_name_force falhou: {e} | status={r.status_code} body={r.text[:300]}") from None
+    return False
+
+def ensure_guild_row(guild_id: int | str, guild_name: Optional[str] = None) -> None:
+    """
+    Upsert idempotente do registro na tabela do tradutor e,
+    se guild_name vier, aplica PATCH para gravar/atualizar o nome.
+    """
+    # 1) garante linha pelo ID (não depende do schema de colunas adicionais)
+    r = _post_upsert_emails_translator({"guild_id": str(guild_id)})
+    try:
+        r.raise_for_status()
+    except requests.HTTPError as e:
+        raise RuntimeError(f"ensure_guild_row (upsert id) falhou: {e} | status={r.status_code} body={r.text[:300]}") from None
+
+    # 2) se veio nome, tenta PATCH dedicado (mais confiável que on_conflict para atualizar campos)
+    if guild_name:
+        try:
+            set_guild_name_force(guild_id, guild_name)
+        except Exception as e:
+            # Não quebra o fluxo de quem chamou; apenas informa se DEBUG
+            if _SUPABASE_DEBUG:
+                print("ensure_guild_row: PATCH nome falhou:", e)
 
 # --- Helpers administrativos opcionais (use se precisar no futuro) ---
 
