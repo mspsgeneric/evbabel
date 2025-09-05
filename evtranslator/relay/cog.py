@@ -131,20 +131,29 @@ class RelayCog(commands.Cog):
 
 
 
+    
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # === RITA: checagem e saída imediata (logo no topo) ===
-        if message.guild and self.rita_block and await self._guild_has_rita(message.guild):
-            try:
-                await message.channel.send(
-                    "⚠️ Este servidor já possui um bot de tradução comercial (Rita). "
-                    "O EVbabel não funcionará aqui e será removido."
-                )
-            except Exception:
-                pass
-            try:
-                await message.guild.leave()
-            finally:
+        # === RITA: checagem e saída imediata (com guard por guild) ===
+        if message.guild and self.rita_block:
+            gid = message.guild.id
+            if gid not in self._rita_warned:
+                if await self._guild_has_rita(message.guild):
+                    # marca já, para evitar múltiplos envios simultâneos
+                    self._rita_warned.add(gid)
+                    try:
+                        await message.channel.send(
+                            "⚠️ Este servidor já possui um bot de tradução comercial (Rita). "
+                            "O EVbabel não funcionará aqui e será removido."
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        await message.guild.leave()
+                    finally:
+                        return
+            else:
+                # já avisado/saindo — evita spam caso chegue outra mensagem no meio
                 return
 
         # === Filtros originais ===
@@ -247,6 +256,7 @@ class RelayCog(commands.Cog):
 
         await maybe_warn_90pct(message.guild, self.warned_guilds)
         await send_translation(self.bot, message, target_ch, translated, message.webhook_id is not None)
+
 
 
 
