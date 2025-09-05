@@ -43,7 +43,7 @@ class AjudaCog(commands.Cog):
                 "- **/deslinkar_todos** — remove todos os links do servidor.",
                 "- **/clonar** — clona o canal atual (até 50 msgs) traduzindo para EN, preservando anexos.",
                 "- **/quota** — exibe uso e limite mensal (com barra de progresso).",
-                "- **/event_mode** — *(se disponível)* ativa/desativa modo de evento (cooldowns/limites especiais).",
+                
                 "",
                 "### 🔐 Regras de permissão",
                 "- Admin pode criar/remover **qualquer** link.",
