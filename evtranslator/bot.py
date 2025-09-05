@@ -21,6 +21,7 @@ from .cogs.quota import Quota
 from .cogs.clonar import Clonar
 from evtranslator.supabase_client import guild_exists
 import os 
+from .cogs.guild_sync import GuildSyncCog
 
 
 log = logging.getLogger(__name__)
@@ -60,6 +61,7 @@ class EVTranslatorBot(commands.Bot):
         self.webhooks = WebhookSender(bot_user_id=bot_user_id)
 
         # Cogs
+        await self.add_cog(GuildSyncCog(self))
         await self.add_cog(LinksCog(self))
         await self.add_cog(RelayCog(self))
         await self.add_cog(EventsCog(self))
