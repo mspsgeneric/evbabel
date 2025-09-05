@@ -54,6 +54,7 @@ class RelayCog(commands.Cog):
         self.dedupe = Dedupe(float(os.getenv("EV_DEDUPE_WINDOW_SEC", "3.0")))
         self._rita_cache: dict[int, bool] = {}   # ⬅️ adicione esta linha no __init__
         self._rita_warned: set[int] = set()      # ✅ guard anti-spam de aviso
+        self._rita_mutex = asyncio.Lock()  # 🔒 evita aviso duplicado por corrida
 
         # === BLOQUEIO DE RITA ===
         # Ativa/desativa via env (padrão: on)
@@ -149,24 +150,23 @@ class RelayCog(commands.Cog):
     
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # === RITA: checagem e saída imediata (um aviso por guild, mas SEM bloquear o leave) ===
+        # === RITA: checagem e saída imediata com seção crítica ===
         if message.guild and self.rita_block:
             gid = message.guild.id
-            if await self._guild_has_rita(message.guild):
-                # só evita spam de aviso; sair do servidor acontece SEMPRE
-                if gid not in self._rita_warned:
-                    self._rita_warned.add(gid)
+            async with self._rita_mutex:  # 🔒 evita múltiplos envios simultâneos
+                if await self._guild_has_rita(message.guild):
+                    if gid not in self._rita_warned:
+                        self._rita_warned.add(gid)
+                        try:
+                            await message.channel.send(
+                                "⚠️ Este servidor já possui um bot de tradução comercial. O EVbabel será removido."
+                            )
+                        except Exception:
+                            pass
                     try:
-                        await message.channel.send(
-                            "⚠️ Este servidor já possui um bot de tradução comercial. "
-                            "O EVbabel será removido."
-                        )
-                    except Exception:
-                        pass
-                try:
-                    await message.guild.leave()
-                finally:
-                    return
+                        await message.guild.leave()
+                    finally:
+                        return
 
         # === Filtros originais ===
         if not basic_checks(message):
