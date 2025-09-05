@@ -115,12 +115,40 @@ class LinksCog(commands.Cog):
                 )
 
         # 🤖 bot precisa enviar no destino (e ler ambos)
+        
         me = inter.guild.me
-        if not me or not canal_pt.permissions_for(me).read_messages or not canal_en.permissions_for(me).send_messages:
-            return await inter.response.send_message(
-                "Eu preciso poder **ler o canal PT** e **enviar no canal EN**.",
-                ephemeral=True,
-            )
+        if not me:
+            return await inter.response.send_message("Não consegui identificar meu usuário no servidor.", ephemeral=True)
+
+        perms_src = canal_pt.permissions_for(me)
+        perms_dst = canal_en.permissions_for(me)
+
+        # PT (origem): ver + ler (mensagens ou histórico)
+        src_ok = perms_src.view_channel and (perms_src.read_messages or perms_src.read_message_history)
+
+        # EN (destino): ver + (gerenciar webhooks OU enviar mensagens)
+        # -> usando webhooks, o essencial é manage_webhooks; send_messages é opcional
+        dst_ok = perms_dst.view_channel and (perms_dst.manage_webhooks or perms_dst.send_messages)
+
+        if not (src_ok and dst_ok):
+            partes = ["Eu preciso de permissões para funcionar:"]
+            if not src_ok:
+                faltas = []
+                if not perms_src.view_channel:
+                    faltas.append("Ver canal")
+                if not (perms_src.read_messages or perms_src.read_message_history):
+                    faltas.append("Ler mensagens ou histórico")
+                partes.append(f"• No canal PT {canal_pt.mention}: **{', '.join(faltas)}**")
+            if not dst_ok:
+                faltas = []
+                if not perms_dst.view_channel:
+                    faltas.append("Ver canal")
+                if not (perms_dst.manage_webhooks or perms_dst.send_messages):
+                    faltas.append("Gerenciar webhooks **ou** Enviar mensagens")
+                partes.append(f"• No canal EN {canal_en.mention}: **{', '.join(faltas)}**")
+            partes.append("Dica: dê **Gerenciar webhooks** na categoria do canal EN (ou Administrator).")
+            return await inter.response.send_message("\n".join(partes), ephemeral=True)
+
 
         # ✅ checar duplicidade (par direto ou invertido)
         info_a = await get_link_info(DB_PATH, inter.guild.id, canal_pt.id)  # type: ignore[arg-type]
