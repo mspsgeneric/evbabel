@@ -19,6 +19,7 @@ from .relay.cog import RelayCog
 from .cogs.events import EventsCog
 from .cogs.quota import Quota
 from .cogs.clonar import Clonar
+from .cogs.ajuda import AjudaCog
 from evtranslator.supabase_client import guild_exists
 import os 
 from .cogs.guild_sync import GuildSyncCog
@@ -67,6 +68,7 @@ class EVTranslatorBot(commands.Bot):
         await self.add_cog(EventsCog(self))
         await self.add_cog(Quota(self))
         await self.add_cog(Clonar(self))
+        await self.add_cog(AjudaCog(self))
 
         self._reconcile_task = asyncio.create_task(self._reconcile_loop())
 
