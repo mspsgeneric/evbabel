@@ -77,6 +77,19 @@ class RelayCog(commands.Cog):
             except Exception:
                 pass
 
+    @commands.Cog.listener()
+    async def on_guild_remove(self, guild: discord.Guild):
+        # Saiu do servidor → limpa caches para permitir novo aviso no futuro
+        self._rita_warned.discard(guild.id)
+        self._rita_cache.pop(guild.id, None)
+
+    @commands.Cog.listener()
+    async def on_guild_join(self, guild: discord.Guild):
+        # Entrou num servidor novo/antigo → garante que poderá avisar de novo
+        self._rita_warned.discard(guild.id)
+        self._rita_cache.pop(guild.id, None)
+
+
     # === RITA: helper de detecção (COLE AQUI, logo abaixo do on_ready) ===
     async def _guild_has_rita(self, guild: discord.Guild) -> bool:
         """
@@ -145,8 +158,8 @@ class RelayCog(commands.Cog):
                     self._rita_warned.add(gid)
                     try:
                         await message.channel.send(
-                            "⚠️ Este servidor já possui um bot de tradução comercial (Rita). "
-                            "O EVbabel não funcionará aqui e será removido."
+                            "⚠️ Este servidor já possui um bot de tradução comercial. "
+                            "O EVbabel será removido."
                         )
                     except Exception:
                         pass
