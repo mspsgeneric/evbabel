@@ -136,7 +136,7 @@ class EVTranslatorBot(commands.Bot):
                                     None
                                 )
                                 if ch:
-                                    await ch.send("👋 Este servidor foi removido do painel. O EVbabel deixará a guild.")
+                                    await ch.send("👋 Servidor não autorizado.")
                             except Exception:
                                 pass
                             # Sai da guild
