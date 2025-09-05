@@ -123,12 +123,19 @@ class LinksCog(commands.Cog):
         perms_src = canal_pt.permissions_for(me)
         perms_dst = canal_en.permissions_for(me)
 
-        # PT (origem): ver + ler (mensagens ou histórico)
-        src_ok = perms_src.view_channel and (perms_src.read_messages or perms_src.read_message_history)
+        # Se for admin, bypass total (equivale a todas as permissões)
+        if perms_src.administrator:
+            src_ok = True
+        else:
+            # PT (origem): ver + ler (mensagens ou histórico)
+            src_ok = perms_src.view_channel and (perms_src.read_messages or perms_src.read_message_history)
 
-        # EN (destino): ver + (gerenciar webhooks OU enviar mensagens)
-        # -> usando webhooks, o essencial é manage_webhooks; send_messages é opcional
-        dst_ok = perms_dst.view_channel and (perms_dst.manage_webhooks or perms_dst.send_messages)
+        if perms_dst.administrator:
+            dst_ok = True
+        else:
+            # EN (destino): ver + (gerenciar webhooks OU enviar mensagens)
+            # → como usamos webhook, "manage_webhooks" já basta; "send_messages" é opcional
+            dst_ok = perms_dst.view_channel and (perms_dst.manage_webhooks or perms_dst.send_messages)
 
         if not (src_ok and dst_ok):
             partes = ["Eu preciso de permissões para funcionar:"]
@@ -148,6 +155,7 @@ class LinksCog(commands.Cog):
                 partes.append(f"• No canal EN {canal_en.mention}: **{', '.join(faltas)}**")
             partes.append("Dica: dê **Gerenciar webhooks** na categoria do canal EN (ou Administrator).")
             return await inter.response.send_message("\n".join(partes), ephemeral=True)
+
 
 
         # ✅ checar duplicidade (par direto ou invertido)
