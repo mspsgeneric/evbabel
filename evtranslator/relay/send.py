@@ -74,10 +74,25 @@ async def send_translation(
     if not msgs:
         return None
 
-    if len(msgs[-1]) + len(TRANSLATED_FLAG) <= MAX_MSG_LEN:
-        msgs[-1] = msgs[-1] + TRANSLATED_FLAG
-    else:
+    # Não atrapalhar embeds: evite colar flag em mensagens que são só URL
+    def _is_pure_url_block(s: str) -> bool:
+        return bool(re.fullmatch(r'\s*https?://\S+\s*', s or ""))
+
+    # tenta colocar a flag na última mensagem que não seja apenas URL
+    applied = False
+    for i in range(len(msgs) - 1, -1, -1):
+        if not _is_pure_url_block(msgs[i]):
+            if len(msgs[i]) + len(TRANSLATED_FLAG) <= MAX_MSG_LEN:
+                msgs[i] += TRANSLATED_FLAG
+            else:
+                msgs.append(TRANSLATED_FLAG)
+            applied = True
+            break
+
+    # se todas as mensagens são só link, manda a flag como mensagem separada
+    if not applied:
         msgs.append(TRANSLATED_FLAG)
+
 
     # (2) Envia e CAPTURA os IDs só da primeira mensagem de conteúdo (se existir).
     saved_ids = None
