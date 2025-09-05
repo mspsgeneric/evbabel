@@ -19,6 +19,9 @@ from .relay.cog import RelayCog
 from .cogs.events import EventsCog
 from .cogs.quota import Quota
 from .cogs.clonar import Clonar
+from evtranslator.supabase_client import guild_exists
+import os 
+
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +39,10 @@ class EVTranslatorBot(commands.Bot):
 
         self.http_session: Optional[aiohttp.ClientSession] = None
         self.webhooks: Optional[WebhookSender] = None
+        self.reconcile_interval = float(os.getenv("EV_RECONCILE_SEC", "45"))  # segundos
+        self.leave_if_missing = os.getenv("EV_LEAVE_IF_MISSING", "false").lower() == "true"
+        self._reconcile_task: asyncio.Task | None = None
+
 
     async def setup_hook(self) -> None:
         # DB boot
@@ -58,6 +65,9 @@ class EVTranslatorBot(commands.Bot):
         await self.add_cog(EventsCog(self))
         await self.add_cog(Quota(self))
         await self.add_cog(Clonar(self))
+
+        self._reconcile_task = asyncio.create_task(self._reconcile_loop())
+
 
         # Slash sync
         try:
@@ -105,3 +115,36 @@ class EVTranslatorBot(commands.Bot):
         if self.http_session and not self.http_session.closed:
             await self.http_session.close()
         await super().close()
+
+
+
+    async def _reconcile_loop(self):
+        await self.wait_until_ready()
+        log = logging.getLogger(__name__)
+
+        while not self.is_closed():
+            try:
+                if self.leave_if_missing:
+                    # Varre todas as guilds onde o bot está
+                    for g in list(self.guilds):
+                        ok = await asyncio.to_thread(guild_exists, g.id)
+                        if not ok:
+                            # Aviso amigável em algum canal onde o bot possa falar
+                            try:
+                                ch = g.system_channel or next(
+                                    (c for c in g.text_channels if c.permissions_for(g.me).send_messages),
+                                    None
+                                )
+                                if ch:
+                                    await ch.send("👋 Este servidor foi removido do painel. O EVbabel deixará a guild.")
+                            except Exception:
+                                pass
+                            # Sai da guild
+                            try:
+                                await g.leave()
+                            except Exception as e:
+                                log.warning("Falha ao sair da guild %s: %s", g.id, e)
+            except Exception as e:
+                log.warning("reconcile loop error: %s", e)
+
+            await asyncio.sleep(self.reconcile_interval)

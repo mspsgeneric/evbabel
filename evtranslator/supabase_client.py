@@ -172,6 +172,29 @@ def ensure_guild_row(guild_id: int | str, guild_name: Optional[str] = None) -> N
             if _SUPABASE_DEBUG:
                 print("ensure_guild_row: PATCH nome falhou:", e)
 
+
+
+# --- Presença no painel ---
+
+def guild_exists(guild_id: int | str) -> bool:
+    """
+    True se a guild existir na tabela emails_translator (painel).
+    Usado para decidir se o bot deve sair do servidor.
+    """
+    base, key = _get_env()
+    url = f"{base}/rest/v1/emails_translator?select=guild_id&guild_id=eq.{guild_id}&limit=1"
+    r = _get_session().get(url, headers=_headers(key), timeout=_DEFAULT_TIMEOUT)
+    # 200 com [] = não existe; >=1 item = existe
+    if r.status_code != 200:
+        # Em caso de erro transitório, considere 'existe' para não sair por engano
+        return True
+    try:
+        data = r.json()
+    except ValueError:
+        return True
+    return bool(data)
+
+
 # --- Helpers administrativos opcionais (use se precisar no futuro) ---
 
 def set_translate_enabled(guild_id: int | str, enabled: bool) -> dict:
