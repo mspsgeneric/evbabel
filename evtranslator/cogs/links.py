@@ -47,6 +47,29 @@ def _chunk_text(text: str, max_len: int = MAX_MSG) -> List[str]:
         parts.append("\n".join(cur))
     return parts
 
+async def _resolve_channel(guild: discord.Guild, ch_id: int) -> Optional[discord.abc.GuildChannel]:
+    ch = guild.get_channel(ch_id)
+    if ch:
+        return ch
+    try:
+        return await guild.fetch_channel(ch_id)  # 404 se não existe mais
+    except discord.NotFound:
+        return None
+
+async def _resolve_user_name(bot: discord.Client, user_id: int, cache: Dict[int, str]) -> str:
+    if user_id in cache:
+        return cache[user_id]
+    # tenta resolver como Member (se estiver no guild) ou como User global
+    name = f"<@{user_id}>"
+    try:
+        u = await bot.fetch_user(user_id)
+        if u:
+            name = f"{u.mention} ({u.name})"
+    except Exception:
+        pass
+    cache[user_id] = name
+    return name
+
 
 class LinksCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -207,33 +230,6 @@ class LinksCog(commands.Cog):
 
     
     # ========== /links ==========
-
-
-    
-
-
-    async def _resolve_channel(guild: discord.Guild, ch_id: int) -> Optional[discord.abc.GuildChannel]:
-        ch = guild.get_channel(ch_id)
-        if ch:
-            return ch
-        try:
-            return await guild.fetch_channel(ch_id)  # 404 se não existe mais
-        except discord.NotFound:
-            return None
-
-    async def _resolve_user_name(bot: discord.Client, user_id: int, cache: Dict[int, str]) -> str:
-        if user_id in cache:
-            return cache[user_id]
-        # tenta resolver como Member (se estiver no guild) ou como User global
-        name = f"<@{user_id}>"
-        try:
-            u = await bot.fetch_user(user_id)
-            if u:
-                name = f"{u.mention} ({u.name})"
-        except Exception:
-            pass
-        cache[user_id] = name
-        return name
 
     @app_commands.command(name="links", description="Lista os pares de canais linkados neste servidor.")
     @app_commands.guild_only()
