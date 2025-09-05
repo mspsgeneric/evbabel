@@ -4,6 +4,7 @@ import logging
 import discord
 from discord.ext import commands
 from discord import app_commands
+from typing import Optional, Dict, Tuple, List
 
 from evtranslator.db import (
     link_pair,
@@ -16,6 +17,9 @@ from evtranslator.db import (
 
 from evtranslator.config import DB_PATH
 
+MAX_MSG = 1900  # margem de segurança para não encostar nos 2000 chars
+
+
 log = logging.getLogger(__name__)
 
 # 🔒 limitar seleção a canais de TEXTO
@@ -25,6 +29,23 @@ TEXT_ONLY = [discord.ChannelType.text]
 def _has_send(ch: discord.TextChannel, member: discord.Member) -> bool:
     perms = ch.permissions_for(member)
     return perms.view_channel and perms.send_messages
+
+def _chunk_text(text: str, max_len: int = MAX_MSG) -> List[str]:
+    if len(text) <= max_len:
+        return [text]
+    parts, cur = [], []
+    cur_len = 0
+    for line in text.splitlines():
+        if cur_len + len(line) + 1 > max_len:
+            parts.append("\n".join(cur))
+            cur = [line]
+            cur_len = len(line) + 1
+        else:
+            cur.append(line)
+            cur_len += len(line) + 1
+    if cur:
+        parts.append("\n".join(cur))
+    return parts
 
 
 class LinksCog(commands.Cog):
@@ -186,6 +207,34 @@ class LinksCog(commands.Cog):
 
     
     # ========== /links ==========
+
+
+    
+
+
+    async def _resolve_channel(guild: discord.Guild, ch_id: int) -> Optional[discord.abc.GuildChannel]:
+        ch = guild.get_channel(ch_id)
+        if ch:
+            return ch
+        try:
+            return await guild.fetch_channel(ch_id)  # 404 se não existe mais
+        except discord.NotFound:
+            return None
+
+    async def _resolve_user_name(bot: discord.Client, user_id: int, cache: Dict[int, str]) -> str:
+        if user_id in cache:
+            return cache[user_id]
+        # tenta resolver como Member (se estiver no guild) ou como User global
+        name = f"<@{user_id}>"
+        try:
+            u = await bot.fetch_user(user_id)
+            if u:
+                name = f"{u.mention} ({u.name})"
+        except Exception:
+            pass
+        cache[user_id] = name
+        return name
+
     @app_commands.command(name="links", description="Lista os pares de canais linkados neste servidor.")
     @app_commands.guild_only()
     async def links_cmd(self, inter: discord.Interaction):
@@ -206,10 +255,10 @@ class LinksCog(commands.Cog):
         except Exception:
             list_with_owner = None
 
-        pairs = None
+        # estrutura: (a, la, b, lb, owner_id)
+        pairs: Optional[List[Tuple[int, str, int, str, Optional[int]]]] = None
         if callable(list_with_owner):
             try:
-                # retorna lista: (a, la, b, lb, created_by)
                 pairs = await list_with_owner(DB_PATH, inter.guild.id)  # type: ignore[arg-type]
             except Exception as e:
                 log.warning("[links] list_links_with_owner falhou/indisponível: %s", e)
@@ -221,7 +270,7 @@ class LinksCog(commands.Cog):
         # 🔎 filtro de visualização:
         # - Admin: vê todos.
         # - Usuário comum: vê apenas os que criou (owner == user.id).
-        visible = []
+        visible: List[Tuple[int, str, int, str, Optional[int]]] = []
         mine = 0
         for a, la, b, lb, owner in pairs:
             if is_admin or (owner is not None and int(owner) == user.id):
@@ -237,22 +286,16 @@ class LinksCog(commands.Cog):
                 ephemeral=True
             )
 
-        linhas = []
+        # ordena por nome do canal A (fallback por ID)
+        # primeiro vamos resolver canais e limpar órfãos
+        linhas: List[str] = []
         removed = 0
         skips = 0
-
-        async def resolve(guild: discord.Guild, ch_id: int):
-            ch = guild.get_channel(ch_id)
-            if ch:
-                return ch
-            try:
-                return await guild.fetch_channel(ch_id)  # 404 se não existe mais
-            except discord.NotFound:
-                return None
+        resolved_rows: List[Tuple[discord.TextChannel, str, discord.TextChannel, str, Optional[int]]] = []
 
         for a, la, b, lb, owner in visible:
-            ra = await resolve(inter.guild, a)  # type: ignore[arg-type]
-            rb = await resolve(inter.guild, b)  # type: ignore[arg-type]
+            ra = await _resolve_channel(inter.guild, a)  # type: ignore[arg-type]
+            rb = await _resolve_channel(inter.guild, b)  # type: ignore[arg-type]
 
             if ra is None or rb is None:
                 await unlink_pair(DB_PATH, inter.guild.id, a, b)  # type: ignore[arg-type]
@@ -260,12 +303,23 @@ class LinksCog(commands.Cog):
                 continue
 
             if not isinstance(ra, discord.TextChannel) or not isinstance(rb, discord.TextChannel):
-                # opcional: se quiser limpar tudo que não for TextChannel, descomente:
+                # opcional: limpar tudo que não for TextChannel
                 # await unlink_pair(DB_PATH, inter.guild.id, a, b)  # type: ignore[arg-type]
                 skips += 1
                 continue
 
-            owner_txt = f" • criador: <@{owner}>" if (owner and is_admin) else ""
+            resolved_rows.append((ra, la, rb, lb, owner))
+
+        resolved_rows.sort(key=lambda row: (row[0].name or "", row[0].id))
+
+        # resolve nomes dos criadores (com cache) — só se admin
+        owner_cache: Dict[int, str] = {}
+        for ra, la, rb, lb, owner in resolved_rows:
+            if is_admin and owner:
+                owner_name = await _resolve_user_name(inter.client, int(owner), owner_cache)  # type: ignore[arg-type]
+                owner_txt = f" • criador: {owner_name}"
+            else:
+                owner_txt = ""
             linhas.append(f"🔗 {ra.mention} ({la})  ⇄  {rb.mention} ({lb}){owner_txt}")
 
         total = len(linhas)
@@ -279,8 +333,11 @@ class LinksCog(commands.Cog):
             nota.append(f"👤 Mostrando **apenas os seus** links. ({mine})")
         nota_str = ("\n" + "\n".join(nota)) if nota else ""
 
-        await inter.followup.send(
-            f"**Pares de canais linkados ({total}):**\n{msg}{nota_str}",
-            ephemeral=True
-        )
+        # paginação simples para não estourar 2000 chars
+        header = f"**Pares de canais linkados ({total}):**\n"
+        chunks = _chunk_text(header + msg + nota_str, MAX_MSG)
+        for i, part in enumerate(chunks, 1):
+            suffix = f" (página {i}/{len(chunks)})" if len(chunks) > 1 else ""
+            await inter.followup.send(part + suffix, ephemeral=True)
+
 
