@@ -1,6 +1,11 @@
 # evtranslator/relay/cog.py
 from __future__ import annotations
-import os, time, asyncio, random, logging, discord
+
+import os
+import time
+import asyncio
+import logging
+import discord
 from discord.ext import commands
 
 from evtranslator.config import (
@@ -17,30 +22,44 @@ from evtranslator.relay.translate_wrap import translate_with_controls
 from evtranslator.relay.send import send_translation
 from evtranslator.relay.attachments import extract_urls
 
+from evtranslator.db import (
+    record_translation,
+    get_translation_by_src,
+    touch_translation_edit,
+    purge_xlate_older_than,
+    delete_translation_map,
+)
 
 from evtranslator.relay.quota import (
     ensure_and_snapshot,
     check_enabled_and_notice,
-    precheck_chars,             # NOVO
-    commit_chars,               # NOVO
+    precheck_chars,
+    commit_chars,
     maybe_warn_90pct,
 )
+
+log = logging.getLogger(__name__)
+
 
 class RelayCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.user_cooldowns: dict[int,float] = {}
-        self.channel_cooldowns: dict[int,float] = {}
+        self.user_cooldowns: dict[int, float] = {}
+        self.channel_cooldowns: dict[int, float] = {}
         self.warned_guilds: set[int] = set()
-        self.disabled_notice_ts: dict[int,float] = {}
+        self.disabled_notice_ts: dict[int, float] = {}
+
         self.event_mode = os.getenv("EV_MODE_EVENT", "false").lower() == "true"
         self.user_cd_event = float(os.getenv("EV_USER_COOLDOWN_SEC", "1.5"))
         self.chan_cd_event = float(os.getenv("EV_CHANNEL_COOLDOWN_SEC", "2.0"))
+
         rate = float(os.getenv("EV_PROVIDER_RATE_CAP", "12"))
         burst = float(os.getenv("EV_PROVIDER_BURST", "24"))
         self.rate_limiter = TokenBucket(rate, burst)
+
         self.translate_timeout = float(os.getenv("EV_TRANSLATE_TIMEOUT", "8"))
         self.jitter_ms = int(os.getenv("EV_JITTER_MS", "150"))
+
         self.backoff_cfg = BackoffCfg(
             attempts=int(os.getenv("EV_RETRY_ATTEMPTS", "3")),
             base=float(os.getenv("EV_RETRY_BASE", "0.3")),
@@ -53,22 +72,25 @@ class RelayCog(commands.Cog):
             cooldown_sec=float(os.getenv("EV_CB_COOLDOWN", "30")),
         )
         self.dedupe = Dedupe(float(os.getenv("EV_DEDUPE_WINDOW_SEC", "3.0")))
-        self._rita_cache: dict[int, bool] = {}   # ⬅️ adicione esta linha no __init__
-        self._rita_warned: set[int] = set()      # ✅ guard anti-spam de aviso
-        self._rita_mutex = asyncio.Lock()  # 🔒 evita aviso duplicado por corrida
-        self._guild_snap_ts: dict[int, float] = {}  # throttle de snapshot por guild
-        self._guild_snap_interval = 600.0  # 10 minutos
 
+        self._rita_cache: dict[int, bool] = {}
+        self._rita_warned: set[int] = set()
+        self._rita_mutex = asyncio.Lock()
 
-        # === BLOQUEIO DE RITA ===
-        # Ativa/desativa via env (padrão: on)
+        self._guild_snap_ts: dict[int, float] = {}
+        self._guild_snap_interval = 600.0  # 10 min
+
+        self.edit_window_sec = int(os.getenv("EV_EDIT_WINDOW_SEC", "3600"))
+        self._xlate_cleanup_interval = int(os.getenv("EV_EDIT_CLEAN_SEC", "600"))
+        self._xlate_cleanup_started = False
+
+        # Rita block
         self.rita_block = os.getenv("EV_BLOCK_RITA", "true").lower() == "true"
-        # IDs oficiais (opcional, recomendado). Ex: "123456789012345678,987654321098765432"
         self.known_rita_ids: set[int] = {
             int(x.strip()) for x in os.getenv("EV_RITA_IDS", "").split(",") if x.strip().isdigit()
         }
 
-        # expõe o WebhookSender (bot.bot_user_id é setado em on_ready do bot)
+        # Webhook manager (session injetada no on_ready)
         self.webhook_sender = WebhookSender(bot_user_id=None, default_avatar_bytes=None)
         setattr(self.bot, "webhooks", self.webhook_sender)
 
@@ -81,16 +103,22 @@ class RelayCog(commands.Cog):
                 self.webhook_sender.default_avatar_bytes = await self.bot.user.display_avatar.read()
             except Exception:
                 pass
+        if not self._xlate_cleanup_started:
+            self._xlate_cleanup_started = True
+            asyncio.create_task(self._xlate_cleanup_loop())
+
+        # injeta a http_session do bot no WebhookSender (necessário p/ Webhook.partial)
+        self.webhook_sender.http_session = getattr(self.bot, "http_session", None)
+        log.info("webhook: http_session injetada = %s", self.webhook_sender.http_session is not None)
+        log.info("DB_PATH runtime=%s (cwd=%s)", DB_PATH, os.getcwd())
 
     @commands.Cog.listener()
     async def on_guild_remove(self, guild: discord.Guild):
-        # Saiu do servidor → limpa caches para permitir novo aviso no futuro
         self._rita_warned.discard(guild.id)
         self._rita_cache.pop(guild.id, None)
 
     @commands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild):
-        # Entrou num servidor novo/antigo → garante que poderá avisar de novo
         self._rita_warned.discard(guild.id)
         self._rita_cache.pop(guild.id, None)
 
@@ -102,20 +130,136 @@ class RelayCog(commands.Cog):
             except Exception:
                 pass
 
+    # =======================
+    # EDIT: helper reutilizado
+    # =======================
+    async def _handle_message_edit(self, after: discord.Message):
+        # ignora bots/webhooks/DMs
+        if after.guild is None or after.author.bot or after.webhook_id is not None:
+            return
 
+        # precisa ter link (lado origem)
+        link = await get_link_info(DB_PATH, after.guild.id, after.channel.id)
+        if not link:
+            return
+        target_id, src_lang, tgt_lang = link
+        target_ch = after.guild.get_channel(target_id)
+        if not isinstance(target_ch, discord.TextChannel):
+            return
 
-    # === RITA: helper de detecção (COLE AQUI, logo abaixo do on_ready) ===
+        # consulta mapeamento
+        info = await get_translation_by_src(DB_PATH, after.guild.id, after.id)
+        if not info:
+            log.info("edit: sem vínculo para src_msg=%s (guild=%s)", after.id, after.guild.id)
+            return
+
+        src_ch_id, tgt_msg_id, tgt_ch_id, webhook_id, created_at = info
+        now = int(time.time())
+        if now - int(created_at) > self.edit_window_sec:
+            log.info("edit: janela expirada p/ src_msg=%s (age=%ss > %ss)", after.id, now - int(created_at), self.edit_window_sec)
+            return
+
+        # reprocessa texto
+        text = (after.content or "").strip()
+        text_no_urls, urls_in_text = extract_urls(text)
+        text_no_urls = clamp_text(text_no_urls)
+
+        # quota + tradução
+        if len(text_no_urls) >= MIN_MSG_LEN:
+            ok, used, cap = await precheck_chars(after.guild.id, len(text_no_urls))
+            if not ok:
+                log.info("edit: quota negada p/ guild=%s chars=%s used=%s cap=%s", after.guild.id, len(text_no_urls), used, cap)
+                return
+
+            translated_core = await translate_with_controls(
+                self.bot.http_session, text_no_urls, src_lang, tgt_lang,
+                getattr(self.bot, "sem", asyncio.Semaphore(1)),
+                self.translate_timeout, self.jitter_ms,
+                self.backoff_cfg, self.cb, self.rate_limiter.acquire,
+            )
+            if translated_core is None:
+                log.info("edit: tradução falhou (None) p/ src_msg=%s", after.id)
+                return
+        else:
+            translated_core = text_no_urls
+
+        translated = (translated_core + ("\n" + "\n".join(urls_in_text) if urls_in_text else "")).strip()
+
+        # preferir o canal salvo no vínculo
+        saved_target = after.guild.get_channel(tgt_ch_id)
+        if isinstance(saved_target, discord.TextChannel):
+            target_ch = saved_target
+
+        try:
+            log.info("edit: vínculo tgt_msg_id=%s webhook_id=%s tgt_ch_id=%s", tgt_msg_id, webhook_id, tgt_ch_id)
+
+            # tenta com o MESMO webhook persistido
+            wh = await self.webhook_sender.get_by_id(int(webhook_id))
+            if wh is not None:
+                log.info("edit: usando webhook persistido %s", webhook_id)
+            else:
+                log.info("edit: webhook_id %s não encontrado; usando get_or_create()", webhook_id)
+                wh = await self.webhook_sender.get_or_create(target_ch)
+                if wh is None:
+                    log.warning("edit: get_or_create falhou em #%s", getattr(target_ch, "name", "?"))
+                    return
+
+            await wh.edit_message(int(tgt_msg_id), content=translated, allowed_mentions=discord.AllowedMentions.none())
+            log.info("edit: sucesso p/ tgt_msg_id=%s", tgt_msg_id)
+
+            if len(text_no_urls) >= MIN_MSG_LEN:
+                committed = await commit_chars(after.guild.id, len(text_no_urls))
+                log.info("edit: commit_chars=%s guild=%s chars=%s", committed, after.guild.id, len(text_no_urls))
+            await touch_translation_edit(DB_PATH, after.guild.id, after.id, now)
+
+        except discord.NotFound:
+            # Mensagem original não pode mais ser editada → não repostar; remover vínculo
+            try:
+                await delete_translation_map(DB_PATH, after.guild.id, after.id)
+            except Exception:
+                pass
+            log.info("edit: NotFound; vínculo desativado p/ src=%s guild=%s", after.id, after.guild.id)
+
+        except Exception as e:
+            log.warning("edit: erro ao editar via webhook: %s", e)
+
+    # evento com mensagem no cache
+    @commands.Cog.listener()
+    async def on_message_edit(self, before: discord.Message, after: discord.Message):
+        await self._handle_message_edit(after)
+
+    # evento RAW: cobre pós-restart / fora do cache
+    @commands.Cog.listener()
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent):
+        log.info("edit:RAW payload guild=%s channel=%s msg=%s keys=%s",
+                 payload.guild_id, payload.channel_id, payload.message_id, list(payload.data.keys()))
+        if payload.guild_id is None or payload.channel_id is None or payload.message_id is None:
+            return
+
+        guild = self.bot.get_guild(payload.guild_id)
+        if guild is None:
+            return
+        ch = guild.get_channel(payload.channel_id)
+        if not isinstance(ch, discord.TextChannel):
+            return
+
+        try:
+            msg = await ch.fetch_message(payload.message_id)
+        except discord.NotFound:
+            log.info("edit:RAW fetch miss (msg not found)")
+            return
+        except Exception as e:
+            log.info("edit:RAW fetch error: %s", e)
+            return
+
+        await self._handle_message_edit(msg)
+
+    # ====== Rita detection helpers ======
     async def _guild_has_rita(self, guild: discord.Guild) -> bool:
-        """
-        True se encontrar Rita no servidor.
-        Usa cache; se necessário, força chunk ou fetch dos membros uma única vez.
-        """
-        # cache curto: evita custo por mensagem
         cached = self._rita_cache.get(guild.id)
         if cached is not None:
             return cached
         try:
-            # 1) Checa membros já carregados
             def _is_rita(m: discord.Member) -> bool:
                 if not m.bot:
                     return False
@@ -129,7 +273,6 @@ class RelayCog(commands.Cog):
                     self._rita_cache[guild.id] = True
                     return True
 
-            # 2) Se a lista parece incompleta, tenta "chunkar"
             if not getattr(guild, "chunked", False):
                 try:
                     await guild.chunk()
@@ -140,28 +283,23 @@ class RelayCog(commands.Cog):
                         self._rita_cache[guild.id] = True
                         return True
 
-            # 3) Último recurso: fetch via API (uma vez)
             try:
                 async for m in guild.fetch_members(limit=None):
                     if _is_rita(m):
                         self._rita_cache[guild.id] = True
                         return True
             except Exception:
-                # Se falhar o fetch, segue sem travar
                 pass
 
             self._rita_cache[guild.id] = False
             return False
         except Exception:
-            # Em caso de erro inesperado, não bloquear
             self._rita_cache[guild.id] = False
             return False
 
-
-
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # === Upsert + snapshot com throttle (evita hits a cada msg) ===
+        # snapshot throttle
         snapshot = None
         if message.guild is not None:
             gid = message.guild.id
@@ -175,10 +313,10 @@ class RelayCog(commands.Cog):
                 else:
                     self._guild_snap_ts[gid] = now
 
-        # === RITA: checagem e saída imediata com seção crítica ===
+        # Rita block
         if message.guild and self.rita_block:
             gid = message.guild.id
-            async with self._rita_mutex:  # 🔒 evita múltiplos envios simultâneos
+            async with self._rita_mutex:
                 if await self._guild_has_rita(message.guild):
                     if gid not in self._rita_warned:
                         self._rita_warned.add(gid)
@@ -193,7 +331,7 @@ class RelayCog(commands.Cog):
                     finally:
                         return
 
-        # === Filtros originais ===
+        # filtros
         if not basic_checks(message):
             return
         if not await tupperbox_guard(message):
@@ -210,14 +348,12 @@ class RelayCog(commands.Cog):
 
         text = (message.content or "").strip()
         has_atts = bool(message.attachments)
-        # 🔎 separe URLs do texto para que NUNCA sejam traduzidas / corrompidas
         text_no_urls, urls_in_text = extract_urls(text)
         has_url = bool(urls_in_text)
 
         if not short_text_ok(text_no_urls or text, has_atts, has_url):
             return
 
-        # clamp só no que será traduzido
         text_no_urls = clamp_text(text_no_urls)
 
         # cooldowns
@@ -235,22 +371,20 @@ class RelayCog(commands.Cog):
         if self.event_mode and not self.dedupe.check_and_set(message.channel.id, message.author.id, text):
             return
 
-        # 🔁 Fallback: se o throttle não buscou agora, garanta um snapshot aqui
+        # fallback snapshot
         if snapshot is None and message.guild is not None:
             try:
                 snapshot = await ensure_and_snapshot(message.guild.id, message.guild.name)
             except Exception:
                 snapshot = {}
 
-        # ❗️Checagem de habilitação/aviso
         if not await check_enabled_and_notice(message, snapshot or {}, self.disabled_notice_ts):
             return
 
-        # 🔠 traduz só o que não é URL
+        # traduz apenas o que não é URL
         should_translate = len(text_no_urls) >= MIN_MSG_LEN
 
         if should_translate:
-            # 1) Pré-checagem: NÃO consome ainda
             n_chars = len(text_no_urls)
             ok, used, cap = await precheck_chars(message.guild.id, n_chars)
             if not ok:
@@ -263,7 +397,6 @@ class RelayCog(commands.Cog):
                     pass
                 return
 
-            # 2) Traduz com controles (timeout/backoff/circuit/rate)
             translated_core = await translate_with_controls(
                 self.bot.http_session, text_no_urls, src_lang, tgt_lang,
                 getattr(self.bot, "sem", asyncio.Semaphore(1)),
@@ -271,12 +404,10 @@ class RelayCog(commands.Cog):
                 self.backoff_cfg, self.cb, self.rate_limiter.acquire,
             )
             if translated_core is None:
-                # Falhou → não consome
                 return
         else:
-            translated_core = text_no_urls  # vazio ou curtinho → não traduz
+            translated_core = text_no_urls
 
-        # 🔗 reanexa URLs intactas (uma por linha) ao final do texto traduzido
         if urls_in_text:
             if translated_core:
                 translated = translated_core + "\n" + "\n".join(urls_in_text)
@@ -285,7 +416,6 @@ class RelayCog(commands.Cog):
         else:
             translated = translated_core
 
-        # ✅ Commit da cota só depois que a tradução deu certo
         if should_translate:
             committed = await commit_chars(message.guild.id, len(text_no_urls))
             if not committed:
@@ -299,9 +429,36 @@ class RelayCog(commands.Cog):
                 return
 
         await maybe_warn_90pct(message.guild, self.warned_guilds)
-        await send_translation(self.bot, message, target_ch, translated, message.webhook_id is not None)
+        ids = await send_translation(self.bot, message, target_ch, translated, message.webhook_id is not None)
 
+        log.info(
+            "send_translation ids=%r (guild=%s ch=%s src_msg=%s)",
+            ids, message.guild.id, target_ch.id, message.id
+        )
 
+        if ids:
+            tgt_msg_id, webhook_id = ids
+            try:
+                await record_translation(
+                    DB_PATH,
+                    message.guild.id,
+                    message.id,
+                    message.channel.id,
+                    int(tgt_msg_id),
+                    target_ch.id,
+                    int(webhook_id),
+                    int(time.time()),
+                )
+            except Exception as e:
+                log.warning("record_translation falhou: %s", e)
 
-
-
+    async def _xlate_cleanup_loop(self):
+        while not self.bot.is_closed():
+            try:
+                cutoff = int(time.time() - (self.edit_window_sec + 300))  # janela + 5min
+                deleted = await purge_xlate_older_than(DB_PATH, cutoff)
+                if deleted:
+                    log.info("[xlate] purge: %d vínculos antigos removidos", deleted)
+            except Exception as e:
+                log.warning("[xlate] cleanup error: %s", e)
+            await asyncio.sleep(self._xlate_cleanup_interval)

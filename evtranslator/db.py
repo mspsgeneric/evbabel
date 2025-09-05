@@ -48,6 +48,43 @@ async def init_db(db_path: str):
         # ✅ garante a coluna created_by (se ainda não existir)
         await _ensure_created_by_column(db)
 
+
+
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS xlate_msgs (
+                guild_id     INTEGER NOT NULL,
+                src_msg_id   INTEGER NOT NULL,
+                src_ch_id    INTEGER NOT NULL,
+                tgt_msg_id   INTEGER NOT NULL,
+                tgt_ch_id    INTEGER NOT NULL,
+                webhook_id   INTEGER NOT NULL,
+                created_at   INTEGER NOT NULL,  -- epoch seconds
+                last_edit_at INTEGER,
+                PRIMARY KEY (guild_id, src_msg_id)
+            );
+            """
+        )
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_xlate_created ON xlate_msgs(created_at);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_xlate_tgt ON xlate_msgs(tgt_msg_id);")
+
+
+        # === Tokens de webhooks por canal (permitir editar pós-restart) ===
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS webhook_tokens (
+                guild_id   INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                webhook_id INTEGER NOT NULL PRIMARY KEY,
+                token      TEXT    NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            """
+        )
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_webhook_tokens_channel ON webhook_tokens(channel_id);")
+
+
+
         await db.commit()
 
 # ============== API básica (retrocompatível) ==============
@@ -229,3 +266,95 @@ async def list_links_with_owner(db_path: str, guild_id: int) -> List[Tuple[int, 
                 seen.add(key)
                 out.append((int(a), str(la), int(b), str(lb), None))
             return out
+        
+# ============== Mapeamento de mensagens traduzidas ==============
+
+async def record_translation(db_path: str, guild_id: int, src_msg_id: int, src_ch_id: int,
+                             tgt_msg_id: int, tgt_ch_id: int, webhook_id: int, created_at: int) -> None:
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO xlate_msgs (guild_id, src_msg_id, src_ch_id, tgt_msg_id, tgt_ch_id, webhook_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (guild_id, src_msg_id, src_ch_id, tgt_msg_id, tgt_ch_id, webhook_id, created_at)
+        )
+        await db.commit()
+
+async def get_translation_by_src(db_path: str, guild_id: int, src_msg_id: int):
+    """Retorna (src_ch_id, tgt_msg_id, tgt_ch_id, webhook_id, created_at) ou None."""
+    async with aiosqlite.connect(db_path) as db:
+        cur = await db.execute(
+            "SELECT src_ch_id, tgt_msg_id, tgt_ch_id, webhook_id, created_at "
+            "FROM xlate_msgs WHERE guild_id=? AND src_msg_id=?",
+            (guild_id, src_msg_id)
+        )
+        row = await cur.fetchone()
+        return tuple(map(int, row)) if row else None  # type: ignore[return-value]
+
+async def touch_translation_edit(db_path: str, guild_id: int, src_msg_id: int, ts: int) -> None:
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "UPDATE xlate_msgs SET last_edit_at=? WHERE guild_id=? AND src_msg_id=?",
+            (ts, guild_id, src_msg_id)
+        )
+        await db.commit()
+
+async def purge_xlate_older_than(db_path: str, cutoff_epoch: int) -> int:
+    """Apaga vínculos antigos; retorna quantos deletou."""
+    async with aiosqlite.connect(db_path) as db:
+        cur = await db.execute("DELETE FROM xlate_msgs WHERE created_at < ?", (cutoff_epoch,))
+        await db.commit()
+        return cur.rowcount or 0
+    
+async def delete_translation_map(db_path: str, guild_id: int, src_msg_id: int) -> int:
+    """Remove o vínculo de edição para uma mensagem original. Retorna quantas linhas removeu."""
+    async with aiosqlite.connect(db_path) as db:
+        cur = await db.execute(
+            "DELETE FROM xlate_msgs WHERE guild_id=? AND src_msg_id=?",
+            (guild_id, src_msg_id),
+        )
+        await db.commit()
+        return cur.rowcount or 0
+    
+
+
+# ============== Webhook tokens (persistência) ==============
+
+async def upsert_webhook_token(db_path: str, guild_id: int, channel_id: int, webhook_id: int, token: str, created_at: int) -> None:
+    async with aiosqlite.connect(db_path) as db:
+        # PRIMARY KEY(webhook_id) → substitui token se recriar o mesmo id (raro), mantém 1 linha por webhook
+        await db.execute(
+            "INSERT INTO webhook_tokens (guild_id, channel_id, webhook_id, token, created_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(webhook_id) DO UPDATE SET token=excluded.token, channel_id=excluded.channel_id, guild_id=excluded.guild_id",
+            (guild_id, channel_id, webhook_id, token, created_at)
+        )
+        await db.commit()
+
+async def get_webhook_token_by_id(db_path: str, webhook_id: int) -> Optional[tuple[int, int, str]]:
+    """Retorna (guild_id, channel_id, token) ou None."""
+    async with aiosqlite.connect(db_path) as db:
+        cur = await db.execute(
+            "SELECT guild_id, channel_id, token FROM webhook_tokens WHERE webhook_id=?",
+            (webhook_id,)
+        )
+        row = await cur.fetchone()
+        return (int(row[0]), int(row[1]), str(row[2])) if row else None
+
+async def get_webhook_for_channel(db_path: str, channel_id: int) -> Optional[tuple[int, str]]:
+    """Retorna (webhook_id, token) recente para um canal, se houver."""
+    async with aiosqlite.connect(db_path) as db:
+        cur = await db.execute(
+            "SELECT webhook_id, token FROM webhook_tokens WHERE channel_id=? ORDER BY created_at DESC LIMIT 1",
+            (channel_id,)
+        )
+        row = await cur.fetchone()
+        return (int(row[0]), str(row[1])) if row else None
+
+async def delete_webhook_token(db_path: str, webhook_id: int) -> int:
+    async with aiosqlite.connect(db_path) as db:
+        cur = await db.execute("DELETE FROM webhook_tokens WHERE webhook_id=?", (webhook_id,))
+        await db.commit()
+        return cur.rowcount or 0
+
+
+

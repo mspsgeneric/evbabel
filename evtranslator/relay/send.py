@@ -47,63 +47,70 @@ def _split_by_limit(lines: list[str]) -> list[str]:
         msgs.append(cur)
     return msgs
 
+# evtranslator/relay/send.py
+
 async def send_translation(
     bot, src_msg: discord.Message, target_ch: discord.TextChannel,
     translated_text: str | None, is_proxy_msg: bool
 ):
-    # 1) Texto traduzido + normalização de URLs de mídia “proxied”
+    # (1) ... código que já existe até montar msgs ...
     base_text = (translated_text or "").strip()
     if base_text:
         base_text = rewrite_proxied_image_urls_in_text(base_text)
 
-    # 2) Anexos → mídia (img+vídeo) e outros
     media_urls, other_urls = split_attachment_urls(src_msg.attachments or [])
     media_urls = rewrite_links(media_urls)
     other_urls = rewrite_links(other_urls)
-
-    # 2.1) Se houver anexos, não ecoar "VID-....mp4" etc. como texto
     base_text = strip_filename_only_text(base_text, src_msg.attachments or [])
 
-    # 3) Monta fila de mensagens
     msgs: list[str] = []
-
     if base_text:
         msgs.append(base_text)
-
     if media_urls:
-        msgs.extend(_split_by_limit(media_urls))  # URLs puras → preview grande
-
+        msgs.extend(_split_by_limit(media_urls))
     if other_urls:
         lines = ["**Anexos:**"] + [f"• {u}" for u in other_urls]
         msgs.extend(_split_by_limit(lines))
-
     if not msgs:
-        return  # nada para enviar
+        return None
 
-    # 4) Garante o flag invisível NA ÚLTIMA mensagem (sem duplicar e sem estourar limite)
     if len(msgs[-1]) + len(TRANSLATED_FLAG) <= MAX_MSG_LEN:
         msgs[-1] = msgs[-1] + TRANSLATED_FLAG
     else:
         msgs.append(TRANSLATED_FLAG)
 
-    # 5) Envia na ordem
-    for body in msgs:
-        await _send(bot, src_msg, target_ch, body, is_proxy_msg)
+    # (2) Envia e CAPTURA os IDs só da primeira mensagem de conteúdo (se existir).
+    saved_ids = None
+    for i, body in enumerate(msgs):
+        want_ids = (i == 0 and bool(base_text))  # captura o primeiro "conteúdo"
+        ids = await _send(bot, src_msg, target_ch, body, is_proxy_msg, return_message=want_ids)
+        if want_ids and ids:
+            saved_ids = ids
 
-async def _send(bot, src_msg: discord.Message, target_ch: discord.TextChannel, content: str, is_proxy_msg: bool):
+    return saved_ids  # (msg_id, webhook_id) ou None
+
+
+async def _send(
+    bot, src_msg: discord.Message, target_ch: discord.TextChannel,
+    content: str, is_proxy_msg: bool, return_message: bool = False
+):
     try:
         if is_proxy_msg:
             username = src_msg.author.name or src_msg.author.display_name
             avatar_url = str(src_msg.author.display_avatar.url) if src_msg.author.display_avatar else None
-            await bot.webhooks.send_as_identity(
+            return await bot.webhooks.send_as_identity(
                 target_ch, username, avatar_url, content,
-                allowed_mentions=discord.AllowedMentions.none()
+                allowed_mentions=discord.AllowedMentions.none(),
+                return_message=return_message,
             )
         else:
-            await bot.webhooks.send_as_member(
+            return await bot.webhooks.send_as_member(
                 target_ch, src_msg.author, content,
-                allowed_mentions=discord.AllowedMentions.none()
+                allowed_mentions=discord.AllowedMentions.none(),
+                return_message=return_message,
             )
     except TypeError:
-        # fallback sem webhook
+        # Fallback sem webhook: não retornamos IDs (não dá para editar depois)
         await target_ch.send(content=content, allowed_mentions=discord.AllowedMentions.none())
+        return None
+
