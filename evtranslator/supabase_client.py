@@ -118,15 +118,6 @@ def get_quota(guild_id: int | str) -> dict:
 
 # --- helpers REST para nomes/linhas ---
 
-def _post_upsert_emails_translator(payload: dict) -> requests.Response:
-    base, key = _get_env()
-    url = f"{base}/rest/v1/emails_translator?on_conflict=guild_id"
-    headers = _headers(key) | {"Prefer": "resolution=merge-duplicates"}
-    r = _get_session().post(url, json=payload, headers=headers, timeout=_DEFAULT_TIMEOUT)
-    if _SUPABASE_DEBUG:
-        print("POST upsert emails_translator", r.status_code, r.text[:300])
-    return r
-
 def _patch_emails_translator(guild_id: int | str, patch: dict) -> requests.Response:
     base, key = _get_env()
     url = f"{base}/rest/v1/emails_translator?guild_id=eq.{guild_id}"
@@ -144,42 +135,16 @@ def set_guild_name_force(guild_id: int | str, guild_name: str) -> bool:
     r = _patch_emails_translator(guild_id, {"guild_name": str(guild_name)})
     if 200 <= r.status_code < 300:
         return True
-    # Se coluna não existir ou outra falha, levanta só se debug desativado; senão, dá contexto
     try:
         r.raise_for_status()
     except requests.HTTPError as e:
         raise RuntimeError(f"set_guild_name_force falhou: {e} | status={r.status_code} body={r.text[:300]}") from None
     return False
 
-def ensure_guild_row(guild_id: int | str, guild_name: Optional[str] = None) -> None:
-    """
-    Upsert idempotente do registro na tabela do tradutor e,
-    se guild_name vier, aplica PATCH para gravar/atualizar o nome.
-    """
-    # 1) garante linha pelo ID (não depende do schema de colunas adicionais)
-    r = _post_upsert_emails_translator({"guild_id": str(guild_id)})
-    try:
-        r.raise_for_status()
-    except requests.HTTPError as e:
-        raise RuntimeError(f"ensure_guild_row (upsert id) falhou: {e} | status={r.status_code} body={r.text[:300]}") from None
-
-    # 2) se veio nome, tenta PATCH dedicado (mais confiável que on_conflict para atualizar campos)
-    if guild_name:
-        try:
-            set_guild_name_force(guild_id, guild_name)
-        except Exception as e:
-            # Não quebra o fluxo de quem chamou; apenas informa se DEBUG
-            if _SUPABASE_DEBUG:
-                print("ensure_guild_row: PATCH nome falhou:", e)
-
-
-
-# --- Presença no painel ---
-
 def guild_exists(guild_id: int | str) -> bool:
     """
     True se a guild existir na tabela emails_translator (painel).
-    Usado para decidir se o bot deve sair do servidor.
+    Usado para decidir se o bot deve sair do servidor e para whitelist rígido.
     """
     base, key = _get_env()
     url = f"{base}/rest/v1/emails_translator?select=guild_id&guild_id=eq.{guild_id}&limit=1"
@@ -194,6 +159,25 @@ def guild_exists(guild_id: int | str) -> bool:
         return True
     return bool(data)
 
+def ensure_guild_row(guild_id: int | str, guild_name: Optional[str] = None) -> None:
+    """
+    MODO WHITELIST RÍGIDO:
+    - NÃO cria linha no Supabase.
+    - Se a guild JÁ existir, atualiza o nome (PATCH).
+    - Se não existir, não faz nada.
+    """
+    if not guild_exists(guild_id):
+        # Não cadastrado no painel → não cria, não atualiza
+        if _SUPABASE_DEBUG:
+            print(f"ensure_guild_row: guild {guild_id} não existe no painel (whitelist rígido).")
+        return
+
+    if guild_name:
+        try:
+            set_guild_name_force(guild_id, guild_name)
+        except Exception as e:
+            if _SUPABASE_DEBUG:
+                print("ensure_guild_row: PATCH nome falhou:", e)
 
 # --- Helpers administrativos opcionais (use se precisar no futuro) ---
 
