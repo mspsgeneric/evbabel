@@ -132,14 +132,15 @@ class RelayCog(commands.Cog):
 
 
     
+    
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # === RITA: checagem e saída imediata (com guard por guild) ===
+        # === RITA: checagem e saída imediata (um aviso por guild, mas SEM bloquear o leave) ===
         if message.guild and self.rita_block:
             gid = message.guild.id
-            if gid not in self._rita_warned:
-                if await self._guild_has_rita(message.guild):
-                    # marca já, para evitar múltiplos envios simultâneos
+            if await self._guild_has_rita(message.guild):
+                # só evita spam de aviso; sair do servidor acontece SEMPRE
+                if gid not in self._rita_warned:
                     self._rita_warned.add(gid)
                     try:
                         await message.channel.send(
@@ -148,13 +149,10 @@ class RelayCog(commands.Cog):
                         )
                     except Exception:
                         pass
-                    try:
-                        await message.guild.leave()
-                    finally:
-                        return
-            else:
-                # já avisado/saindo — evita spam caso chegue outra mensagem no meio
-                return
+                try:
+                    await message.guild.leave()
+                finally:
+                    return
 
         # === Filtros originais ===
         if not basic_checks(message):
@@ -256,6 +254,7 @@ class RelayCog(commands.Cog):
 
         await maybe_warn_90pct(message.guild, self.warned_guilds)
         await send_translation(self.bot, message, target_ch, translated, message.webhook_id is not None)
+
 
 
 
