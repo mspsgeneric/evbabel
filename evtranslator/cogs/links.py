@@ -75,6 +75,7 @@ class LinksCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+
     # ========== /linkar ==========
     @app_commands.command(
         name="linkar",
@@ -115,7 +116,6 @@ class LinksCog(commands.Cog):
                 )
 
         # 🤖 bot precisa enviar no destino (e ler ambos)
-        
         me = inter.guild.me
         if not me:
             return await inter.response.send_message("Não consegui identificar meu usuário no servidor.", ephemeral=True)
@@ -123,18 +123,14 @@ class LinksCog(commands.Cog):
         perms_src = canal_pt.permissions_for(me)
         perms_dst = canal_en.permissions_for(me)
 
-        # Se for admin, bypass total (equivale a todas as permissões)
         if perms_src.administrator:
             src_ok = True
         else:
-            # PT (origem): ver + ler (mensagens ou histórico)
             src_ok = perms_src.view_channel and (perms_src.read_messages or perms_src.read_message_history)
 
         if perms_dst.administrator:
             dst_ok = True
         else:
-            # EN (destino): ver + (gerenciar webhooks OU enviar mensagens)
-            # → como usamos webhook, "manage_webhooks" já basta; "send_messages" é opcional
             dst_ok = perms_dst.view_channel and (perms_dst.manage_webhooks or perms_dst.send_messages)
 
         if not (src_ok and dst_ok):
@@ -155,8 +151,6 @@ class LinksCog(commands.Cog):
                 partes.append(f"• No canal EN {canal_en.mention}: **{', '.join(faltas)}**")
             partes.append("Dica: dê **Gerenciar webhooks** na categoria do canal EN (ou Administrator).")
             return await inter.response.send_message("\n".join(partes), ephemeral=True)
-
-
 
         # ✅ checar duplicidade (par direto ou invertido)
         info_a = await get_link_info(DB_PATH, inter.guild.id, canal_pt.id)  # type: ignore[arg-type]
@@ -184,10 +178,12 @@ class LinksCog(commands.Cog):
             await link_pair(DB_PATH, inter.guild.id, canal_pt.id, canal_en.id)  # type: ignore[arg-type]
 
         log.info(f"[links] {inter.guild.id}: link {canal_pt.id}<->{canal_en.id} (by {created_by})")
+        # ✅ sucesso sempre ephemeral
         await inter.response.send_message(
             f"🔗 Link criado: {canal_pt.mention} *(pt)* ⇄ {canal_en.mention} *(en)*",
-            ephemeral=not is_admin  # admin pode querer deixar público
+            ephemeral=True
         )
+
 
     # ========== /deslinkar ==========
     @app_commands.command(name="deslinkar", description="Remove o link do canal atual com seu par.")
@@ -211,7 +207,6 @@ class LinksCog(commands.Cog):
         assert isinstance(user, discord.Member)
         is_admin = user.guild_permissions.administrator or user.guild_permissions.manage_guild
 
-        # 🔐 se não for admin, confirmar que o usuário é o criador do link
         if not is_admin:
             owner_id = None
             try:
@@ -238,7 +233,6 @@ class LinksCog(commands.Cog):
                     ephemeral=True,
                 )
 
-            # também exige permissão de falar no canal de origem (boa prática)
             if not _has_send(current_ch, user):
                 return await inter.response.send_message(
                     "Você precisa ter permissão para falar neste canal.",
@@ -249,7 +243,9 @@ class LinksCog(commands.Cog):
         pair_txt = f"{current_ch.mention} ({src_lang}) ⇄ {target_ch.mention if isinstance(target_ch, discord.TextChannel) else f'#{target_id}'} ({tgt_lang})"
 
         log.info(f"[links] {inter.guild.id}: unlink {current_ch.id}<->{target_id} (by {user.id})")
-        return await inter.response.send_message(f"❌ Link removido: {pair_txt}", ephemeral=not is_admin)
+        # ✅ sucesso sempre ephemeral
+        return await inter.response.send_message(f"❌ Link removido: {pair_txt}", ephemeral=True)
+
 
     # ========== /deslinkar_todos ==========
     @app_commands.command(name="deslinkar_todos", description="Remove todos os links deste servidor.")
