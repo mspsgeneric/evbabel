@@ -76,11 +76,9 @@ class EVTranslatorBot(commands.Bot):
         # Slash sync
         try:
             if TEST_GUILD_ID:
-                await self.tree.sync(guild=discord.Object(id=int(TEST_GUILD_ID)))
-                log.info("Slash sync (guild %s)", TEST_GUILD_ID)
-            else:
-                await self.tree.sync()
-                log.info("Slash sync (global)")
+                await self.tree.sync(guild=discord.Object(id=int(TEST_GUILD_ID)))  # instantâneo na guild de teste
+            await self.tree.sync()  # garante registro global
+            log.info("Slash sync: %s", "guild+global" if TEST_GUILD_ID else "global")
         except Exception as e:
             log.warning("Slash sync failed: %s", e)
 
