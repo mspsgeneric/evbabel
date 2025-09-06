@@ -239,6 +239,9 @@ class WebhookSender:
         return_message: bool = False,
         **kwargs,
     ):
+        
+        
+
         """
         Envia com nome/avatar arbitrários.
         Se return_message=True, retorna (msg_id, webhook_id); caso contrário, None.
@@ -280,3 +283,141 @@ class WebhookSender:
             except Exception:
                 return None
         return None
+    
+
+    
+    async def _execute_with_reference(
+        self,
+        webhook: discord.Webhook,
+        *,
+        content: str,
+        username: str | None,
+        avatar_url: str | None,
+        reference: discord.MessageReference,
+        allowed_mentions: AllowedMentions | None = None,
+    ) -> discord.Message:
+        """
+        Envia via HTTP bruto para suportar 'message_reference' em libs antigas.
+        Retorna um objeto Message (como se wait=True).
+        """
+        if self.http_session is None:
+            raise RuntimeError("http_session não injetada no WebhookSender")
+
+        # payload minimalista (evita o Discord ignorar o encadeamento)
+        payload = {
+            "content": content,
+            "username": username,
+            "avatar_url": avatar_url,
+            "allowed_mentions": (allowed_mentions.to_dict() if allowed_mentions else {"parse": []}),
+            "message_reference": {
+                "message_id": int(reference.message_id),
+                "fail_if_not_exists": False,
+            },
+        }
+
+        # Monta URL base
+        url = f"https://discord.com/api/v10/webhooks/{webhook.id}/{webhook.token}?wait=true"
+
+        # Se o webhook estiver ligado a uma thread, inclua thread_id
+        try:
+            ch = getattr(webhook, "channel", None)
+            # Em algumas versões, webhook.channel pode ser Thread; em outras, TextChannel
+            if isinstance(ch, discord.Thread):
+                url += f"&thread_id={int(ch.id)}"
+        except Exception:
+            pass
+
+        async with self.http_session.post(url, json=payload) as resp:
+            if resp.status >= 400:
+                text = await resp.text()
+                raise RuntimeError(f"Webhook execute falhou: {resp.status} {text}")
+            data = await resp.json()
+
+        # “Message-like” mínimo com id e canal
+        class _SimpleMsg:
+            __slots__ = ("id", "channel")
+            def __init__(self, msg_id: int, channel: discord.abc.Messageable):
+                self.id = msg_id
+                self.channel = channel
+
+        return _SimpleMsg(int(data["id"]), getattr(webhook, "channel", None))  # type: ignore
+
+
+    async def send_as_identity_with_reference(
+        self,
+        channel: discord.TextChannel,
+        username: str | None,
+        avatar_url: str | None,
+        text: str,
+        *,
+        reference: discord.MessageReference,
+        allowed_mentions: AllowedMentions | None,
+        return_message: bool,
+    ):
+        """Mesmo que send_as_identity, mas com reply encadeado via HTTP bruto."""
+        wh = await self.get_or_create(channel)
+        if not wh:
+            log.warning("Sem webhook em #%s; abort em with_reference.", channel.name)
+            return None
+
+        try:
+            result = await self._execute_with_reference(
+                wh,
+                content=text,
+                username=(username or "Proxy")[:80],
+                avatar_url=avatar_url,
+                reference=reference,
+                allowed_mentions=allowed_mentions or AllowedMentions.none(),
+            )
+        except Exception as e:
+            log.warning("Webhook (identity+ref) falhou em #%s: %s", channel.name, e)
+            # tenta sem avatar_url
+            try:
+                result = await self._execute_with_reference(
+                    wh,
+                    content=text,
+                    username=(username or "Proxy")[:80],
+                    avatar_url=None,
+                    reference=reference,
+                    allowed_mentions=allowed_mentions or AllowedMentions.none(),
+                )
+            except Exception as e2:
+                log.warning("Webhook (identity+ref) texto-apenas falhou em #%s: %s", channel.name, e2)
+                return None
+
+        if return_message and result is not None:
+            final_wh = self.cache.get(channel.id) or wh
+            try:
+                return (int(result.id), int(final_wh.id))
+            except Exception:
+                return None
+        return None
+
+    async def send_as_member_with_reference(
+        self,
+        channel: discord.TextChannel,
+        member: discord.Member,
+        text: str,
+        *,
+        reference: discord.MessageReference,
+        allowed_mentions: AllowedMentions | None,
+        return_message: bool,
+    ):
+        """Mesmo que send_as_member, mas com reply encadeado via HTTP bruto."""
+        display = (member.display_name or member.name or "user").strip()[:80]
+        avatar_url = None
+        try:
+            avatar_url = member.display_avatar.replace(size=128).url
+        except Exception:
+            avatar_url = None
+
+        return await self.send_as_identity_with_reference(
+            channel,
+            display,
+            avatar_url,
+            text,
+            reference=reference,
+            allowed_mentions=allowed_mentions,
+            return_message=return_message,
+        )
+

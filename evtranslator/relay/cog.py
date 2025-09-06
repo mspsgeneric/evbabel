@@ -22,6 +22,7 @@ from evtranslator.relay.translate_wrap import translate_with_controls
 from evtranslator.relay.send import send_translation
 from evtranslator.relay.attachments import extract_urls
 from evtranslator.config import TRANSLATED_FLAG
+from .reply import ReplyService
 
 from evtranslator.db import (
     record_translation,
@@ -87,6 +88,8 @@ class RelayCog(commands.Cog):
         self.edit_window_sec = int(os.getenv("EV_EDIT_WINDOW_SEC", "3600"))
         self._xlate_cleanup_interval = int(os.getenv("EV_EDIT_CLEAN_SEC", "600"))
         self._xlate_cleanup_started = False
+        self.map_retention_sec = 30 * 24 * 3600  # 30 dias, sem ENV
+        self.reply_service = ReplyService(bot)
 
         # Rita block
         self.rita_block = os.getenv("EV_BLOCK_RITA", "true").lower() == "true"
@@ -196,6 +199,22 @@ class RelayCog(commands.Cog):
 
         try:
             log.info("edit: vínculo tgt_msg_id=%s webhook_id=%s tgt_ch_id=%s", tgt_msg_id, webhook_id, tgt_ch_id)
+
+
+            if webhook_id == 0:
+                # fallback: traduzido via channel.send → editar direto
+                tgt_ch = after.guild.get_channel(tgt_ch_id)
+                if tgt_ch:
+                    try:
+                        msg = await tgt_ch.fetch_message(tgt_msg_id)
+                        await msg.edit(content=translated, allowed_mentions=discord.AllowedMentions.none())
+                        log.info("edit: sucesso via channel.send p/ tgt_msg_id=%s", tgt_msg_id)
+                        if len(text_no_urls) >= MIN_MSG_LEN:
+                            committed = await commit_chars(after.guild.id, len(text_no_urls))
+                        await touch_translation_edit(DB_PATH, after.guild.id, after.id, now)
+                    except Exception as e:
+                        log.warning("edit: erro ao editar fallback msg=%s: %s", tgt_msg_id, e)
+                return
 
             # tenta com o MESMO webhook persistido
             wh = await self.webhook_sender.get_by_id(int(webhook_id))
@@ -481,13 +500,22 @@ class RelayCog(commands.Cog):
                 return
 
         await maybe_warn_90pct(message.guild, self.warned_guilds)
-        ids = await send_translation(self.bot, message, target_ch, translated, message.webhook_id is not None)
+       
+        
+        reference, effective_ch = await self.reply_service.resolve_reference(message, target_ch)
+
+        ids = await send_translation(
+            self.bot, message, effective_ch, translated, message.webhook_id is not None,
+            reference=reference,
+        )
+
 
         log.info(
             "send_translation ids=%r (guild=%s ch=%s src_msg=%s)",
             ids, message.guild.id, target_ch.id, message.id
         )
 
+        # 3. Grava vínculo no banco
         if ids:
             tgt_msg_id, webhook_id = ids
             try:
@@ -504,13 +532,20 @@ class RelayCog(commands.Cog):
             except Exception as e:
                 log.warning("record_translation falhou: %s", e)
 
+
+ 
     async def _xlate_cleanup_loop(self):
         while not self.bot.is_closed():
             try:
-                cutoff = int(time.time() - (self.edit_window_sec + 300))  # janela + 5min
+                now = int(time.time())
+                cutoff = now - self.map_retention_sec  # 🔁 mantém pares por 30 dias
                 deleted = await purge_xlate_older_than(DB_PATH, cutoff)
                 if deleted:
-                    log.info("[xlate] purge: %d vínculos antigos removidos", deleted)
+                    log.info(
+                        "[xlate] purge: %d vínculos antigos removidos (retenção=%ss)",
+                        deleted, self.map_retention_sec
+                    )
             except Exception as e:
                 log.warning("[xlate] cleanup error: %s", e)
             await asyncio.sleep(self._xlate_cleanup_interval)
+

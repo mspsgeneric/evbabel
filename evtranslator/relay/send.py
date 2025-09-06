@@ -149,38 +149,130 @@ async def _resolve_imgur_direct(session, original_url: str) -> str | None:
 # ==========================
 # Envio via webhook
 # ==========================
+import logging
+log = logging.getLogger(__name__)
+
 async def _send(
     bot, src_msg: discord.Message, target_ch: discord.TextChannel,
-    content: str, is_proxy_msg: bool, return_message: bool = False, **kwargs
+    content: str, is_proxy_msg: bool, return_message: bool = False,
+    reference: discord.MessageReference | None = None,
+    **kwargs
 ):
     try:
-        if is_proxy_msg:
-            username = src_msg.author.name or src_msg.author.display_name
-            avatar_url = str(src_msg.author.display_avatar.url) if src_msg.author.display_avatar else None
-            return await bot.webhooks.send_as_identity(
-                target_ch, username, avatar_url, content,
-                allowed_mentions=discord.AllowedMentions.none(),
-                return_message=return_message,
-                **kwargs,
-            )
+        if reference is None:
+            # fluxo normal via webhook (sem reply)
+            if is_proxy_msg:
+                username = src_msg.author.name or src_msg.author.display_name
+                avatar_url = str(src_msg.author.display_avatar.url) if src_msg.author.display_avatar else None
+                return await bot.webhooks.send_as_identity(
+                    target_ch, username, avatar_url, content,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                    return_message=return_message,
+                    **kwargs,
+                )
+            else:
+                return await bot.webhooks.send_as_member(
+                    target_ch, src_msg.author, content,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                    return_message=return_message,
+                    **kwargs,
+                )
         else:
-            return await bot.webhooks.send_as_member(
-                target_ch, src_msg.author, content,
-                allowed_mentions=discord.AllowedMentions.none(),
-                return_message=return_message,
-                **kwargs,
+            # ✅ Reply "soft inline" com blockquote + inline code + »»
+            log.info(
+                "reply SOFT-INLINE (blockquote): ref_msg=%s ch=%s proxy=%s",
+                getattr(reference, "message_id", None),
+                target_ch.id,
+                is_proxy_msg,
             )
+
+            ref_author = ""
+            excerpt = ""
+            try:
+                ref_msg = await target_ch.fetch_message(int(reference.message_id))
+                ref_author = (getattr(ref_msg.author, "name", "") or getattr(ref_msg.author, "display_name", "") or "").strip()
+                raw = (ref_msg.content or "").strip()
+                first_line = raw.splitlines()[0] if raw else ""
+                excerpt = (first_line[:80] + "…") if len(first_line) > 80 else first_line
+            except Exception:
+                pass
+
+            # jump link
+            jump = None
+            try:
+                guild_id = target_ch.guild.id if target_ch.guild else 0
+                jump = f"https://discord.com/channels/{guild_id}/{target_ch.id}/{int(reference.message_id)}"
+            except Exception:
+                pass
+
+            # --- sanitize ---
+            def _md_sanitize(s: str) -> str:
+                if not s:
+                    return ""
+                s = s.replace("`", "").replace("[", "(").replace("]", ")") \
+                     .replace("*", "").replace("_", "")
+                return " ".join(s.split())
+
+            safe_author = _md_sanitize(ref_author) or "mensagem"
+            safe_excerpt = _md_sanitize(excerpt) or "…"
+
+            # blockquote + inline code com chevron duplo »»
+            if jump:
+                header = f"> »» [`{safe_author}: {safe_excerpt}`]({jump})"
+            else:
+                header = f"> »» `{safe_author}: {safe_excerpt}`"
+
+            soft_content = f"{header}\n{content}".strip()
+
+            # envio via webhook spoofando autor
+            if is_proxy_msg:
+                username = src_msg.author.name or src_msg.author.display_name
+                avatar_url = str(src_msg.author.display_avatar.url) if src_msg.author.display_avatar else None
+                return await bot.webhooks.send_as_identity(
+                    target_ch, username, avatar_url, soft_content,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                    return_message=return_message,
+                    **kwargs,
+                )
+            else:
+                return await bot.webhooks.send_as_member(
+                    target_ch, src_msg.author, soft_content,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                    return_message=return_message,
+                    **kwargs,
+                )
+
     except TypeError:
-        # Fallback sem webhook: não retornamos IDs (não dá para editar depois)
-        await target_ch.send(content=content, allowed_mentions=discord.AllowedMentions.none(), **kwargs)
+        # fallback extra
+        sent = await target_ch.send(
+            content=content,
+            allowed_mentions=discord.AllowedMentions.none(),
+            reference=reference,
+            **kwargs,
+        )
+        if return_message:
+            return (sent.id, 0)
         return None
+
+
+
+
+
+
+
+
+
+
+
+
 
 # ==========================
 # Função principal
 # ==========================
 async def send_translation(
     bot, src_msg: discord.Message, target_ch: discord.TextChannel,
-    translated_text: str | None, is_proxy_msg: bool
+    translated_text: str | None, is_proxy_msg: bool,
+    reference: discord.MessageReference | None = None,
 ):
     # Texto base (com URLs do corpo)
     base_text = (translated_text or "").strip()
@@ -222,14 +314,20 @@ async def send_translation(
             if direct:
                 # mp4: melhor enviar o link direto no conteúdo (player nativo)
                 if direct.lower().endswith(".mp4"):
+                    
                     return await _send(
-                        bot, src_msg, target_ch, direct, is_proxy_msg, return_message=True
+                        bot, src_msg, target_ch, direct, is_proxy_msg,
+                        return_message=True,
+                        reference=reference,  # ✅ novo
                     )
                 # imagem: usa embed explícito (mantém identidade do autor)
                 emb = discord.Embed(url=url)  # link de referência
                 emb.set_image(url=direct)
                 return await _send(
-                    bot, src_msg, target_ch, "", is_proxy_msg, return_message=True, embeds=emb
+                    bot, src_msg, target_ch, "", is_proxy_msg,
+                    return_message=True,
+                    embeds=emb,
+                    reference=reference,  # ✅ novo
                 )
         # Se não deu pra resolver direto, seguimos; IMPORTANTE: não aplicar flag em URL pura
         # para não quebrar o preview nativo do Discord.
@@ -250,8 +348,19 @@ async def send_translation(
     saved_ids = None
     for i, body in enumerate(msgs):
         want_ids = (i == 0)
-        ids = await _send(bot, src_msg, target_ch, body, is_proxy_msg, return_message=want_ids)
+        if want_ids:
+            ids = await _send(
+                bot, src_msg, target_ch, body, is_proxy_msg,
+                return_message=True,
+                reference=reference,  # ✅ reply só no 1º bloco
+            )
+        else:
+            ids = await _send(
+                bot, src_msg, target_ch, body, is_proxy_msg,
+                return_message=False,
+            )
         if want_ids and ids:
             saved_ids = ids
 
     return saved_ids
+
