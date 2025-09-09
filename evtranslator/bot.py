@@ -10,7 +10,9 @@ import discord
 from discord.ext import commands
 
 from .config import INTENTS, TEST_GUILD_ID, CONCURRENCY
-from .db import init_db
+from .db import init_db, get_gloss_rows_for_cache
+
+from evtranslator.glossario import Glossario
 from .webhook import WebhookSender
 
 # Cogs
@@ -44,20 +46,18 @@ class EVTranslatorBot(commands.Bot):
         self.reconcile_interval = float(os.getenv("EV_RECONCILE_SEC", "45"))  # segundos
         self.leave_if_missing = os.getenv("EV_LEAVE_IF_MISSING", "false").lower() == "true"
         self._reconcile_task: asyncio.Task | None = None
+        self.gloss = Glossario()
+
+
 
 
     async def setup_hook(self) -> None:
-        # DB boot
         await init_db(self.db_path)
-
-        # HTTP session com timeout global (evita requests pendurados)
         timeout = aiohttp.ClientTimeout(total=12)
         self.http_session = aiohttp.ClientSession(
             headers={"User-Agent": "EVTranslator/1.0 (+github.com/you)"},
             timeout=timeout,
         )
-
-        # Webhook manager — proteja caso self.user ainda não esteja setado
         bot_user_id = self.user.id if self.user else None  # type: ignore[union-attr]
         self.webhooks = WebhookSender(bot_user_id=bot_user_id)
 
@@ -72,15 +72,32 @@ class EVTranslatorBot(commands.Bot):
 
         self._reconcile_task = asyncio.create_task(self._reconcile_loop())
 
+        # 👇 carregar glossário aqui está ótimo
+        try:
+            rows = await get_gloss_rows_for_cache(self.db_path)
+            self.gloss.carregar(rows)
+            log.info("[gloss] carregado %d termo(s)", len(rows))
+        except Exception as e:
+            log.warning("[gloss] falha ao carregar: %s", e)
 
         # Slash sync
         try:
             if TEST_GUILD_ID:
-                await self.tree.sync(guild=discord.Object(id=int(TEST_GUILD_ID)))  # instantâneo na guild de teste
-            await self.tree.sync()  # garante registro global
+                await self.tree.sync(guild=discord.Object(id=int(TEST_GUILD_ID)))
+            await self.tree.sync()
             log.info("Slash sync: %s", "guild+global" if TEST_GUILD_ID else "global")
         except Exception as e:
             log.warning("Slash sync failed: %s", e)
+
+    # 👇 MOVER para fora do setup_hook
+    async def reload_gloss_cache(self):
+        try:
+            rows = await get_gloss_rows_for_cache(self.db_path)
+            self.gloss.carregar(rows)
+            log.info("[gloss] recarregado %d termo(s)", len(rows))
+        except Exception as e:
+            log.warning("[gloss] falha ao recarregar: %s", e)
+
 
     async def on_ready(self):
         # presença/atividade para facilitar diagnóstico

@@ -1,6 +1,9 @@
 # painel/routes.py
 from aiohttp import web
 from .auth import require_auth
+from evtranslator.db import list_glossario, upsert_glossario, delete_glossario
+
+
 
 def _html(page_title: str, body: str, brand_hex: str) -> web.Response:
     return web.Response(
@@ -128,15 +131,24 @@ def _ctx(request: web.Request):
             "brand": "#22c55e",  # verde
         }
 
+
 def _tabs(bot: str) -> str:
+    gloss = ""
+    if bot == "translator":
+        gloss = f'<a class="tab" href="/admin/glossario?bot={bot}">Glossário</a>'
     return f"""
 <div class="tabs">
-  <a class="tab {'active' if bot=='translator' else ''}" href="/admin/guilds?bot=translator">EVbabel (tradutor)</a>
   <a class="tab {'active' if bot=='logger' else ''}" href="/admin/guilds?bot=logger">EVlogger (logs)</a>
+  <a class="tab {'active' if bot=='translator' else ''}" href="/admin/guilds?bot=translator">EVbabel (tradutor)</a>
+  {gloss}
 </div>
 """
 
-def setup_painel_routes(app: web.Application, supabase):
+
+
+
+def setup_painel_routes(app: web.Application, supabase, db_path: str, on_glossario_change=None):
+
     # ========= LISTAR =========
     async def admin_guilds_list(request: web.Request):
         require_auth(request)
@@ -413,6 +425,254 @@ def setup_painel_routes(app: web.Application, supabase):
         except Exception as e:
             return _html("Erro", f"<p>Erro ao excluir: {e}</p><p><a class='btn' href='/admin/guilds?bot={bot}'>Voltar</a></p>", ctx["brand"])
         raise web.HTTPFound(f"/admin/guilds?bot={bot}")
+    
+
+        # ========= GLOSSÁRIO: LISTAR =========
+    async def glossario_list(request: web.Request):
+        require_auth(request)
+        # força contexto visual do translator
+        bot = "translator"
+        brand = "#8b5cf6"
+
+        q = (request.query.get("q") or "").strip().lower()
+        only_enabled = (request.query.get("all") != "1")
+
+        rows = await list_glossario(db_path, only_enabled=only_enabled)
+        # rows: (id, termo_src, termo_dst, enabled, priority, updated_at, updated_by)
+
+        if q:
+            rows = [r for r in rows if q in (str(r[1]) + " " + str(r[2])).lower()]
+
+        trs = []
+        for (gid, src, dst, enabled, prio, _updated_at, _updated_by) in rows:
+            badge = f"<span class='badge {'on' if enabled else 'off'}'>{'Ativo' if enabled else 'Inativo'}</span>"
+            trs.append(f"""
+<tr>
+  <td data-label="ID">{gid}</td>
+  <td data-label="Origem (EN)">{src}</td>
+  <td data-label="Destino (PT)">{dst}</td>
+  <td data-label="Status">{badge}</td>
+  <td data-label="Prioridade">{prio}</td>
+  <td data-label="Ações">
+    <a class="btn" href="/admin/glossario/{gid}/edit?bot={bot}">Editar</a>
+    <form class="inline" method="post" action="/admin/glossario/{gid}/delete?bot={bot}" onsubmit="return confirm('Excluir este termo?')">
+      <button class="btn danger" type="submit">Excluir</button>
+    </form>
+  </td>
+</tr>""")
+
+        thead = "<tr><th>ID</th><th>Origem (EN)</th><th>Destino (PT)</th><th>Status</th><th>Prioridade</th><th>Ações</th></tr>"
+
+        # destaca a aba "Glossário"
+        tabbar = _tabs(bot).replace('>Glossário<', ' class="tab active">Glossário<')
+
+        body = f"""
+{tabbar}
+<form class="controls" method="get" action="/admin/glossario">
+  <input type="hidden" name="bot" value="{bot}">
+  <div class="search">
+    <input type="text" name="q" value="{q}" placeholder="Buscar por termo...">
+    <button class="btn" type="submit">Buscar</button>
+  </div>
+  <div>
+    <label class="small"><input type="checkbox" name="all" value="1" {'checked' if not only_enabled else ''} onchange="this.form.submit()"> Mostrar todos</label>
+  </div>
+  <a class="btn primary" href="/admin/glossario/new?bot={bot}">+ Novo termo</a>
+</form>
+
+<div class="table-wrap">
+<table>
+  <thead>{thead}</thead>
+  <tbody>
+    {''.join(trs) if trs else '<tr><td data-label="Info" class="small">Nenhum termo.</td></tr>'}
+  </tbody>
+</table>
+</div>
+"""
+        
+
+        return _html("EVbabel — Glossário (EN→PT)", body, brand)
+    
+    # ========= GLOSSÁRIO: NOVO (GET) =========
+    async def glossario_new_get(request: web.Request):
+        require_auth(request)
+        brand = "#8b5cf6"
+        bot = "translator"
+
+        tabbar = _tabs(bot).replace('>Glossário<', ' class="tab active">Glossário<')
+
+        body = f"""
+{tabbar}
+<form method="post" class="form" action="/admin/glossario/new?bot={bot}">
+  <label>
+    <span>Origem (EN)*</span>
+    <input name="termo_src" required placeholder="ex.: Prince">
+  </label>
+  <label>
+    <span>Destino (PT)*</span>
+    <input name="termo_dst" required placeholder="ex.: Príncipe">
+  </label>
+  <label>
+    <span>Prioridade</span>
+    <input name="priority" type="number" value="100" min="1" step="1">
+  </label>
+  <label class="checkbox">
+    <input type="checkbox" name="enabled" checked>
+    <span>Ativo</span>
+  </label>
+
+  <div class="actions full" style="margin-top:4px;">
+    <button class="btn primary" type="submit">Salvar</button>
+    <a class="btn secondary" href="/admin/glossario?bot={bot}">Voltar</a>
+  </div>
+</form>
+"""
+        return _html("Novo termo — Glossário", body, brand)
+
+    # ========= GLOSSÁRIO: NOVO (POST) =========
+    async def glossario_new_post(request: web.Request):
+        require_auth(request)
+        data = await request.post()
+
+        termo_src = (data.get("termo_src") or "").strip()
+        termo_dst = (data.get("termo_dst") or "").strip()
+        priority  = int(data.get("priority") or 100)
+        enabled   = 1 if data.get("enabled") else 0
+
+        if not termo_src or not termo_dst:
+            return _html(
+                "Erro",
+                "<p>Campos obrigatórios: origem e destino.</p>"
+                "<p><a class='btn' href='/admin/glossario/new?bot=translator'>Voltar</a></p>",
+                "#8b5cf6"
+            )
+
+        try:
+            # upsert case-insensitive por termo_src
+            await upsert_glossario(db_path, termo_src, termo_dst, enabled=enabled, priority=priority, updated_by=None)
+        except Exception as e:
+            return _html(
+                "Erro",
+                f"<p>Erro ao salvar: {e}</p>"
+                "<p><a class='btn' href='/admin/glossario?bot=translator'>Voltar</a></p>",
+                "#8b5cf6"
+            )
+
+        # recarrega cache se foi fornecido callback
+        if on_glossario_change:
+            maybe_coro = on_glossario_change()
+            if hasattr(maybe_coro, "__await__"):
+                await maybe_coro
+
+        raise web.HTTPFound("/admin/glossario?bot=translator")
+    # ========= GLOSSÁRIO: EDITAR (GET) =========
+    async def glossario_edit_get(request: web.Request):
+        require_auth(request)
+        brand = "#8b5cf6"
+        bot = "translator"
+        gid = int(request.match_info["gloss_id"])
+
+        rows = await list_glossario(db_path, only_enabled=False)
+        row = next((r for r in rows if r[0] == gid), None)
+        if not row:
+            return _html("Não encontrado", "<p>Termo não encontrado.</p><p><a class='btn' href='/admin/glossario?bot=translator'>Voltar</a></p>", brand)
+
+        _, src, dst, enabled, prio, _updated_at, _updated_by = row
+        checked = "checked" if enabled else ""
+        tabbar = _tabs(bot).replace('>Glossário<', ' class="tab active">Glossário<')
+
+        body = f"""
+{tabbar}
+<form method="post" class="form" action="/admin/glossario/{gid}/edit?bot={bot}">
+  <label>
+    <span>Origem (EN)*</span>
+    <input name="termo_src" required value="{src}">
+  </label>
+  <label>
+    <span>Destino (PT)*</span>
+    <input name="termo_dst" required value="{dst}">
+  </label>
+  <label>
+    <span>Prioridade</span>
+    <input name="priority" type="number" value="{prio}" min="1" step="1">
+  </label>
+  <label class="checkbox">
+    <input type="checkbox" name="enabled" {checked}>
+    <span>Ativo</span>
+  </label>
+
+  <div class="actions full" style="margin-top:4px;">
+    <button class="btn primary" type="submit">Salvar</button>
+    <a class="btn secondary" href="/admin/glossario?bot={bot}">Voltar</a>
+  </div>
+</form>
+"""
+        return _html("Editar termo — Glossário", body, brand)
+
+    # ========= GLOSSÁRIO: EDITAR (POST) =========
+    async def glossario_edit_post(request: web.Request):
+        require_auth(request)
+        brand = "#8b5cf6"
+        bot = "translator"
+        gid = int(request.match_info["gloss_id"])
+        data = await request.post()
+
+        termo_src = (data.get("termo_src") or "").strip()
+        termo_dst = (data.get("termo_dst") or "").strip()
+        priority  = int(data.get("priority") or 100)
+        enabled   = 1 if data.get("enabled") else 0
+
+        if not termo_src or not termo_dst:
+            return _html("Erro", "<p>Campos obrigatórios: origem e destino.</p><p><a class='btn' href='/admin/glossario?bot=translator'>Voltar</a></p>", brand)
+
+        # obtém a versão atual (para detectar renomear de termo_src)
+        rows = await list_glossario(db_path, only_enabled=False)
+        row = next((r for r in rows if r[0] == gid), None)
+        if not row:
+            return _html("Não encontrado", "<p>Termo não encontrado.</p><p><a class='btn' href='/admin/glossario?bot=translator'>Voltar</a></p>", brand)
+
+        _, old_src, _old_dst, _old_enabled, _old_prio, _u1, _u2 = row
+
+        try:
+            # upsert case-insensitive por termo_src (pode criar/atualizar outra linha)
+            await upsert_glossario(db_path, termo_src, termo_dst, enabled=enabled, priority=priority, updated_by=None)
+
+            # Se renomeou a chave (termo_src), removemos o registro antigo por ID
+            if old_src.lower() != termo_src.lower():
+                await delete_glossario(db_path, gid)
+
+        except Exception as e:
+            return _html("Erro", f"<p>Erro ao atualizar: {e}</p><p><a class='btn' href='/admin/glossario?bot=translator'>Voltar</a></p>", brand)
+
+        # recarrega cache se houver callback
+        if on_glossario_change:
+            maybe_coro = on_glossario_change()
+            if hasattr(maybe_coro, "__await__"):
+                await maybe_coro
+
+        raise web.HTTPFound("/admin/glossario?bot=translator")
+
+    # ========= GLOSSÁRIO: EXCLUIR (POST) =========
+    async def glossario_delete_post(request: web.Request):
+        require_auth(request)
+        brand = "#8b5cf6"
+        gid = int(request.match_info["gloss_id"])
+
+        try:
+            await delete_glossario(db_path, gid)
+        except Exception as e:
+            return _html("Erro", f"<p>Erro ao excluir: {e}</p><p><a class='btn' href='/admin/glossario?bot=translator'>Voltar</a></p>", brand)
+
+        # recarrega cache se houver callback
+        if on_glossario_change:
+            maybe_coro = on_glossario_change()
+            if hasattr(maybe_coro, "__await__"):
+                await maybe_coro
+
+        raise web.HTTPFound("/admin/glossario?bot=translator")
+
+
+
 
     # Registrar rotas
     app.router.add_get("/admin/guilds", admin_guilds_list)
@@ -421,3 +681,10 @@ def setup_painel_routes(app: web.Application, supabase):
     app.router.add_get("/admin/guilds/{guild_id}/edit", admin_guilds_edit_get)
     app.router.add_post("/admin/guilds/{guild_id}/edit", admin_guilds_edit_post)
     app.router.add_post("/admin/guilds/{guild_id}/delete", admin_guilds_delete_post)
+    app.router.add_get("/admin/glossario", glossario_list)
+    app.router.add_get("/admin/glossario/new", glossario_new_get)
+    app.router.add_post("/admin/glossario/new", glossario_new_post)
+    app.router.add_get("/admin/glossario/{gloss_id}/edit", glossario_edit_get)
+    app.router.add_post("/admin/glossario/{gloss_id}/edit", glossario_edit_post)
+    app.router.add_post("/admin/glossario/{gloss_id}/delete", glossario_delete_post)
+

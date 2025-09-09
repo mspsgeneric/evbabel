@@ -12,6 +12,7 @@ from evtranslator.bot import EVTranslatorBot
 
 # painel
 from painel.routes import setup_painel_routes
+
 from supabase import create_client
 
 logging.basicConfig(
@@ -26,7 +27,10 @@ async def start_web_app(loop) -> tuple[web.AppRunner, web.TCPSite]:
 
     # autenticação básica é aplicada dentro do setup_painel_routes (via middleware), conforme seus arquivos.
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    setup_painel_routes(app, supabase)
+  
+    # por enquanto sem callback de recarregar cache (vamos adicionar depois)
+    setup_painel_routes(app, supabase, DB_PATH, on_glossario_change=None)
+
 
     host = os.getenv("PANEL_HOST", "0.0.0.0")
     try:

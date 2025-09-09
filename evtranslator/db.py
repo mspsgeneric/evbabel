@@ -84,6 +84,29 @@ async def init_db(db_path: str):
         await db.execute("CREATE INDEX IF NOT EXISTS idx_webhook_tokens_channel ON webhook_tokens(channel_id);")
 
 
+        
+        # === Glossário EN->PT (fechado, só painel edita) ===
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS glossario (
+                id         INTEGER PRIMARY KEY,
+                termo_src  TEXT    NOT NULL,  -- termo origem (ex.: inglês)
+                termo_dst  TEXT    NOT NULL,  -- termo destino (ex.: português)
+                enabled    INTEGER NOT NULL DEFAULT 1,
+                priority   INTEGER NOT NULL DEFAULT 100,  -- maior casa primeiro
+                updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                updated_by BIGINT
+            );
+            """
+        )
+        # índices para consultas rápidas e dedupe
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_gloss_enabled ON glossario (enabled);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_gloss_priority ON glossario (priority DESC);")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_gloss_src_nocase ON glossario (termo_src COLLATE NOCASE);")
+        await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_gloss_src_nocase ON glossario(termo_src COLLATE NOCASE);")
+
+
+
 
         await db.commit()
 
@@ -358,3 +381,88 @@ async def delete_webhook_token(db_path: str, webhook_id: int) -> int:
 
 
 
+# ============== Glossário (painel fechado) ==============
+
+async def list_glossario(db_path: str, only_enabled: bool = True) -> List[tuple]:
+    """
+    Retorna linhas ordenadas para exibição no painel:
+    (id, termo_src, termo_dst, enabled, priority, updated_at, updated_by)
+    """
+    async with aiosqlite.connect(db_path) as db:
+        if only_enabled:
+            cur = await db.execute(
+                "SELECT id, termo_src, termo_dst, enabled, priority, updated_at, updated_by "
+                "FROM glossario WHERE enabled=1 "
+                "ORDER BY priority DESC, LENGTH(termo_src) DESC"
+            )
+        else:
+            cur = await db.execute(
+                "SELECT id, termo_src, termo_dst, enabled, priority, updated_at, updated_by "
+                "FROM glossario "
+                "ORDER BY enabled DESC, priority DESC, LENGTH(termo_src) DESC"
+            )
+        return await cur.fetchall()
+
+async def get_gloss_rows_for_cache(db_path: str):
+    """
+    Retorna [(termo_src, termo_dst, enabled, priority)] já ordenados.
+    """
+    async with aiosqlite.connect(db_path) as db:
+        cur = await db.execute(
+            "SELECT termo_src, termo_dst, enabled, priority "
+            "FROM glossario "
+            "WHERE enabled IN (0,1) "
+            "ORDER BY priority DESC, LENGTH(termo_src) DESC"
+        )
+        rows = await cur.fetchall()
+        # garante tipos corretos
+        return [(str(a), str(b), int(c), int(d)) for (a, b, c, d) in rows]
+
+
+async def upsert_glossario(db_path: str, termo_src: str, termo_dst: str,
+                           enabled: int = 1, priority: int = 100, updated_by: Optional[int] = None) -> int:
+    """
+    Insere ou atualiza por termo_src (case-insensitive). Retorna id da linha.
+    """
+    termo_src = termo_src.strip()
+    termo_dst = termo_dst.strip()
+    async with aiosqlite.connect(db_path) as db:
+        # tenta achar existente (NOCASE)
+        cur = await db.execute(
+            "SELECT id FROM glossario WHERE termo_src = ? COLLATE NOCASE LIMIT 1",
+            (termo_src,)
+        )
+        row = await cur.fetchone()
+        if row:
+            g_id = int(row[0])
+            await db.execute(
+                "UPDATE glossario "
+                "SET termo_dst=?, enabled=?, priority=?, updated_by=?, updated_at=strftime('%s','now') "
+                "WHERE id=?",
+                (termo_dst, int(enabled), int(priority), updated_by, g_id)
+            )
+            await db.commit()
+            return g_id
+        else:
+            cur2 = await db.execute(
+                "INSERT INTO glossario (termo_src, termo_dst, enabled, priority, updated_by) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (termo_src, termo_dst, int(enabled), int(priority), updated_by)
+            )
+            await db.commit()
+            return cur2.lastrowid
+
+async def set_gloss_enabled(db_path: str, gloss_id: int, enabled: bool, updated_by: Optional[int] = None) -> int:
+    async with aiosqlite.connect(db_path) as db:
+        cur = await db.execute(
+            "UPDATE glossario SET enabled=?, updated_by=?, updated_at=strftime('%s','now') WHERE id=?",
+            (1 if enabled else 0, updated_by, gloss_id)
+        )
+        await db.commit()
+        return cur.rowcount or 0
+
+async def delete_glossario(db_path: str, gloss_id: int) -> int:
+    async with aiosqlite.connect(db_path) as db:
+        cur = await db.execute("DELETE FROM glossario WHERE id=?", (gloss_id,))
+        await db.commit()
+        return cur.rowcount or 0

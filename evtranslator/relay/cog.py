@@ -171,15 +171,18 @@ class RelayCog(commands.Cog):
         text_no_urls, urls_in_text = extract_urls(text)
         text_no_urls = clamp_text(text_no_urls)
 
+        # 🔒 MARCA termos de origem com placeholders
+        marked, tags = self.bot.gloss.proteger(text_no_urls, src_lang, tgt_lang)
+
         # quota + tradução
-        if len(text_no_urls) >= MIN_MSG_LEN:
-            ok, used, cap = await precheck_chars(after.guild.id, len(text_no_urls))
+        if len(marked) >= MIN_MSG_LEN:
+            ok, used, cap = await precheck_chars(after.guild.id, len(marked))
             if not ok:
-                log.info("edit: quota negada p/ guild=%s chars=%s used=%s cap=%s", after.guild.id, len(text_no_urls), used, cap)
+                log.info("edit: quota negada p/ guild=%s chars=%s used=%s cap=%s", after.guild.id, len(marked), used, cap)
                 return
 
             translated_core = await translate_with_controls(
-                self.bot.http_session, text_no_urls, src_lang, tgt_lang,
+                self.bot.http_session, marked, src_lang, tgt_lang,
                 getattr(self.bot, "sem", asyncio.Semaphore(1)),
                 self.translate_timeout, self.jitter_ms,
                 self.backoff_cfg, self.cb, self.rate_limiter.acquire,
@@ -188,9 +191,13 @@ class RelayCog(commands.Cog):
                 log.info("edit: tradução falhou (None) p/ src_msg=%s", after.id)
                 return
         else:
-            translated_core = text_no_urls
+            translated_core = marked
+
+        # 🔓 RESTAURA placeholders para o termo final
+        translated_core = self.bot.gloss.restaurar(translated_core, tags)
 
         translated = (translated_core + ("\n" + "\n".join(urls_in_text) if urls_in_text else "")).strip()
+
 
         # preferir o canal salvo no vínculo
         saved_target = after.guild.get_channel(tgt_ch_id)
@@ -455,21 +462,18 @@ class RelayCog(commands.Cog):
         # traduz apenas o que não é URL
         should_translate = len(text_no_urls) >= MIN_MSG_LEN
 
+        # 🔒 MARCA
+        marked, tags = self.bot.gloss.proteger(text_no_urls, src_lang, tgt_lang)
+
         if should_translate:
-            n_chars = len(text_no_urls)
+            n_chars = len(marked)
             ok, used, cap = await precheck_chars(message.guild.id, n_chars)
             if not ok:
-                try:
-                    await message.channel.send(
-                        "⚠️ A cota de tradução deste servidor está esgotada por enquanto. "
-                        "Um admin pode ajustar o limite ou aguardar o reset mensal (`/quota`)."
-                    )
-                except Exception:
-                    pass
+                ...
                 return
 
             translated_core = await translate_with_controls(
-                self.bot.http_session, text_no_urls, src_lang, tgt_lang,
+                self.bot.http_session, marked, src_lang, tgt_lang,
                 getattr(self.bot, "sem", asyncio.Semaphore(1)),
                 self.translate_timeout, self.jitter_ms,
                 self.backoff_cfg, self.cb, self.rate_limiter.acquire,
@@ -477,7 +481,27 @@ class RelayCog(commands.Cog):
             if translated_core is None:
                 return
         else:
-            translated_core = text_no_urls
+            translated_core = marked
+
+        # 🔓 RESTAURA
+        translated_core = self.bot.gloss.restaurar(translated_core, tags)
+
+        # junta URLs como já fazia
+        if urls_in_text:
+            if translated_core:
+                translated = translated_core + "\n" + "\n".join(urls_in_text)
+            else:
+                translated = "\n".join(urls_in_text)
+        else:
+            translated = translated_core
+
+        # aplica glossário só quando o destino é pt (EN→PT)
+        
+        if translated_core:
+            try:
+                translated_core = self.bot.gloss.aplicar(translated_core, tgt_lang)
+            except Exception as e:
+                log.warning("glossario aplicar (new) falhou: %s", e)
 
         if urls_in_text:
             if translated_core:
@@ -486,6 +510,7 @@ class RelayCog(commands.Cog):
                 translated = "\n".join(urls_in_text)
         else:
             translated = translated_core
+            
 
         if should_translate:
             committed = await commit_chars(message.guild.id, len(text_no_urls))
