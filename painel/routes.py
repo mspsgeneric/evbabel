@@ -2,6 +2,8 @@
 from aiohttp import web
 from .auth import require_auth
 from evtranslator.db import list_glossario, upsert_glossario, delete_glossario
+import html
+
 
 
 
@@ -445,12 +447,14 @@ def setup_painel_routes(app: web.Application, supabase, db_path: str, on_glossar
 
         trs = []
         for (gid, src, dst, enabled, prio, _updated_at, _updated_by) in rows:
+            src_h = html.escape(str(src))
+            dst_h = html.escape(str(dst))
             badge = f"<span class='badge {'on' if enabled else 'off'}'>{'Ativo' if enabled else 'Inativo'}</span>"
             trs.append(f"""
 <tr>
   <td data-label="ID">{gid}</td>
-  <td data-label="Origem (EN)">{src}</td>
-  <td data-label="Destino (PT)">{dst}</td>
+  <td data-label="Termo A">{src_h}</td>
+  <td data-label="Termo B">{dst_h}</td>
   <td data-label="Status">{badge}</td>
   <td data-label="Prioridade">{prio}</td>
   <td data-label="Ações">
@@ -461,7 +465,7 @@ def setup_painel_routes(app: web.Application, supabase, db_path: str, on_glossar
   </td>
 </tr>""")
 
-        thead = "<tr><th>ID</th><th>Origem (EN)</th><th>Destino (PT)</th><th>Status</th><th>Prioridade</th><th>Ações</th></tr>"
+        thead = "<tr><th>ID</th><th>Termo A</th><th>Termo B</th><th>Status</th><th>Prioridade</th><th>Ações</th></tr>"
 
         # destaca a aba "Glossário"
         tabbar = _tabs(bot).replace('>Glossário<', ' class="tab active">Glossário<')
@@ -491,7 +495,7 @@ def setup_painel_routes(app: web.Application, supabase, db_path: str, on_glossar
 """
         
 
-        return _html("EVbabel — Glossário (EN→PT)", body, brand)
+        return _html("EVbabel — Glossário (A↔B)", body, brand)
     
     # ========= GLOSSÁRIO: NOVO (GET) =========
     async def glossario_new_get(request: web.Request):
@@ -505,11 +509,11 @@ def setup_painel_routes(app: web.Application, supabase, db_path: str, on_glossar
 {tabbar}
 <form method="post" class="form" action="/admin/glossario/new?bot={bot}">
   <label>
-    <span>Origem (EN)*</span>
+    <span>Termo A*</span>
     <input name="termo_src" required placeholder="ex.: Prince">
   </label>
   <label>
-    <span>Destino (PT)*</span>
+    <span>Termo B*</span>
     <input name="termo_dst" required placeholder="ex.: Príncipe">
   </label>
   <label>
@@ -520,6 +524,8 @@ def setup_painel_routes(app: web.Application, supabase, db_path: str, on_glossar
     <input type="checkbox" name="enabled" checked>
     <span>Ativo</span>
   </label>
+
+  <p class="small">As substituições são aplicadas nos dois sentidos (A↔B).</p>
 
   <div class="actions full" style="margin-top:4px;">
     <button class="btn primary" type="submit">Salvar</button>
@@ -548,6 +554,15 @@ def setup_painel_routes(app: web.Application, supabase, db_path: str, on_glossar
             )
 
         try:
+            # evita cadastrar o mesmo par invertido (B↔A) já existente
+            rows_all = await list_glossario(db_path, only_enabled=False)
+            if any((r[1].lower() == termo_dst.lower() and r[2].lower() == termo_src.lower()) for r in rows_all):
+                return _html(
+                    "Erro",
+                    "<p>Já existe este par invertido (A↔B).</p>"
+                    "<p><a class='btn' href='/admin/glossario?bot=translator'>Voltar</a></p>",
+                    "#8b5cf6"
+                )
             # upsert case-insensitive por termo_src
             await upsert_glossario(db_path, termo_src, termo_dst, enabled=enabled, priority=priority, updated_by=None)
         except Exception as e:
@@ -580,17 +595,19 @@ def setup_painel_routes(app: web.Application, supabase, db_path: str, on_glossar
         _, src, dst, enabled, prio, _updated_at, _updated_by = row
         checked = "checked" if enabled else ""
         tabbar = _tabs(bot).replace('>Glossário<', ' class="tab active">Glossário<')
+        src_h = html.escape(src)
+        dst_h = html.escape(dst)
 
         body = f"""
 {tabbar}
 <form method="post" class="form" action="/admin/glossario/{gid}/edit?bot={bot}">
   <label>
-    <span>Origem (EN)*</span>
-    <input name="termo_src" required value="{src}">
+    <span>Termo A*</span>
+    <input name="termo_src" required value="{src_h}">
   </label>
   <label>
-    <span>Destino (PT)*</span>
-    <input name="termo_dst" required value="{dst}">
+    <span>Termo B*</span>
+    <input name="termo_dst" required value="{dst_h}">
   </label>
   <label>
     <span>Prioridade</span>
@@ -600,6 +617,8 @@ def setup_painel_routes(app: web.Application, supabase, db_path: str, on_glossar
     <input type="checkbox" name="enabled" {checked}>
     <span>Ativo</span>
   </label>
+
+  <p class="small">As substituições são aplicadas nos dois sentidos (A↔B).</p>
 
   <div class="actions full" style="margin-top:4px;">
     <button class="btn primary" type="submit">Salvar</button>
@@ -634,6 +653,15 @@ def setup_painel_routes(app: web.Application, supabase, db_path: str, on_glossar
         _, old_src, _old_dst, _old_enabled, _old_prio, _u1, _u2 = row
 
         try:
+            # evita par invertido (B↔A) em outro registro
+            rows_all = await list_glossario(db_path, only_enabled=False)
+            if any((r[0] != gid and r[1].lower() == termo_dst.lower() and r[2].lower() == termo_src.lower()) for r in rows_all):
+                return _html(
+                    "Erro",
+                    "<p>Já existe este par invertido (A↔B) em outro registro.</p>"
+                    "<p><a class='btn' href='/admin/glossario?bot=translator'>Voltar</a></p>",
+                    brand
+                )
             # upsert case-insensitive por termo_src (pode criar/atualizar outra linha)
             await upsert_glossario(db_path, termo_src, termo_dst, enabled=enabled, priority=priority, updated_by=None)
 
